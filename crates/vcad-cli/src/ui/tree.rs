@@ -17,7 +17,7 @@ pub fn draw_sidebar(
     mouse_row: Option<u16>,
     area: Rect,
 ) {
-    let sidebar_width = 22u16;
+    let sidebar_width = 32u16;
     let max_visible = parts.len().min(20);
     let sidebar_height = (max_visible + 2) as u16;
     let sidebar_height = sidebar_height.max(4).min(area.height.saturating_sub(6));
@@ -152,24 +152,29 @@ fn render_sidebar(
             set_char(buf, x, y, ' ', row_bg, row_bg);
         }
 
-        // Expand caret
-        let caret = if is_selected { '\u{25B8}' } else { ' ' };
-        set_char(buf, left + 1, y, ' ', theme::TEXT_MUTED(), row_bg);
-        set_char(buf, left + 2, y, caret, theme::TEXT_MUTED(), row_bg);
+        // Focus marker + selection checkbox. Keep this explicit so keyboard
+        // selection is visible even in terminals with low-contrast colors.
+        let focus = if is_focused { '>' } else { ' ' };
+        let check = if is_selected { 'x' } else { ' ' };
+        set_char(buf, left + 1, y, focus, theme::ACCENT(), row_bg);
+        set_char(buf, left + 2, y, '[', theme::TEXT_MUTED(), row_bg);
+        set_char(buf, left + 3, y, check, theme::ACCENT(), row_bg);
+        set_char(buf, left + 4, y, ']', theme::TEXT_MUTED(), row_bg);
 
         // Part icon
         let (icon, icon_color) = part_icon(name);
-        set_char(buf, left + 4, y, icon, icon_color, row_bg);
+        set_char(buf, left + 6, y, icon, icon_color, row_bg);
 
-        // Part name
+        // Include the root node id; command-mode selection uses these ids.
+        let label = format!("{} {}", id, name);
         let name_color = if is_selected {
             theme::ACCENT()
         } else {
             theme::TEXT()
         };
-        let max_name_len = inner_width.saturating_sub(6);
-        for (i, ch) in name.chars().take(max_name_len).enumerate() {
-            let x = left + 6 + i as u16;
+        let max_name_len = inner_width.saturating_sub(9);
+        for (i, ch) in label.chars().take(max_name_len).enumerate() {
+            let x = left + 8 + i as u16;
             if x < right {
                 set_char(buf, x, y, ch, name_color, row_bg);
             }
@@ -202,7 +207,7 @@ fn part_icon(name: &str) -> (char, Color) {
 
 /// Returns the Rect of the sidebar for hit-testing.
 pub fn sidebar_rect(area: Rect, parts_count: usize) -> Rect {
-    let sidebar_width = 22u16;
+    let sidebar_width = 32u16;
     let max_visible = parts_count.min(20);
     let sidebar_height = (max_visible + 2) as u16;
     let sidebar_height = sidebar_height.max(4).min(area.height.saturating_sub(6));

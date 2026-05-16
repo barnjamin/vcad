@@ -1168,6 +1168,24 @@ impl App {
             "open" => self.set_status("Open: drag a .vcad file into the terminal"),
             "export_glb" => self.set_status("Export GLB: not yet implemented in TUI"),
             "export_step" => self.set_status("Export STEP: not yet implemented in TUI"),
+            "select" => {
+                if parts.len() < 2 {
+                    self.set_status("Usage: select <id> [id...]");
+                } else {
+                    let valid_roots: std::collections::HashSet<_> =
+                        self.get_parts().into_iter().map(|(id, _)| id).collect();
+                    self.selected.clear();
+                    for raw in &parts[1..] {
+                        if let Ok(id) = raw.parse::<NodeId>() {
+                            if valid_roots.contains(&id) {
+                                self.selected.insert(id);
+                            }
+                        }
+                    }
+                    self.set_status(format!("Selected {} parts", self.selected.len()));
+                    self.auto_switch_tab();
+                }
+            }
             "select_all" => {
                 let ids: Vec<_> = self.get_parts().into_iter().map(|(id, _)| id).collect();
                 self.selected = ids.into_iter().collect();

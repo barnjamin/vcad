@@ -983,6 +983,24 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
                 KeyCode::Char('+') | KeyCode::Char('=') => app.camera.zoom(0.8),
                 KeyCode::Char('-') => app.camera.zoom(1.25),
                 // Part selection
+                KeyCode::Char('j') => {
+                    let parts = app.get_parts();
+                    if !parts.is_empty() {
+                        app.focused_part_index = (app.focused_part_index + 1) % parts.len();
+                        app.set_status(format!("Focused {}", parts[app.focused_part_index].1));
+                    }
+                }
+                KeyCode::Char('k') => {
+                    let parts = app.get_parts();
+                    if !parts.is_empty() {
+                        app.focused_part_index = if app.focused_part_index == 0 {
+                            parts.len() - 1
+                        } else {
+                            app.focused_part_index - 1
+                        };
+                        app.set_status(format!("Focused {}", parts[app.focused_part_index].1));
+                    }
+                }
                 KeyCode::Tab => {
                     let parts = app.get_parts();
                     if !parts.is_empty() {
@@ -996,7 +1014,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
                     app.selected.clear();
                     app.auto_switch_tab();
                 }
-                KeyCode::Enter => {
+                KeyCode::Enter | KeyCode::Char(' ') => {
                     let parts = app.get_parts();
                     if app.focused_part_index < parts.len() {
                         let id = parts[app.focused_part_index].0;
@@ -1005,6 +1023,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
                         } else {
                             app.selected.insert(id);
                         }
+                        app.set_status(format!("{} selected", app.selected.len()));
                         app.auto_switch_tab();
                     }
                 }
