@@ -135,6 +135,16 @@ impl ChatPanel {
     pub fn assistant(&mut self, msg: impl Into<String>) {
         self.push_line(msg.into(), ChatLineKind::Assistant);
     }
+
+    /// Clear visible chat and input/history state.
+    pub fn clear(&mut self) {
+        self.lines.clear();
+        self.history.clear();
+        self.history_index = None;
+        self.input.clear();
+        self.saved_input.clear();
+        self.scroll = 0;
+    }
 }
 
 /// Desired sidebar width in cells. Clamped to 60% of the area width so the

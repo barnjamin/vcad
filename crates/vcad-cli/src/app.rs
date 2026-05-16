@@ -1187,6 +1187,17 @@ impl App {
                 self.chat.open = !self.chat.open;
                 self.chat.focused = self.chat.open;
             }
+            "clear_chat" | "chat_clear" => {
+                self.chat_session.abort();
+                self.chat_session.messages.clear();
+                self.chat_session.event_rx = None;
+                self.chat_session.assistant_buffer.clear();
+                self.chat_session.pending_tools.clear();
+                self.chat_session.in_flight = false;
+                self.chat.clear();
+                crate::chat_session::clear_history();
+                self.set_status("Chat cleared");
+            }
             "toggle_wireframe" => self.set_status("Wireframe: not yet implemented in TUI"),
             "cycle_theme" => {
                 let name = crate::ui::theme::toggle();
