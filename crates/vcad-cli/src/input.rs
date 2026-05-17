@@ -669,9 +669,23 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
             }
             KeyCode::Enter => {
                 if let Some(msg) = app.chat.send_message() {
-                    crate::chat_session::push_user_message(app, msg);
-                    if let Err(e) = crate::chat_session::start_chat_turn(app) {
-                        app.log(crate::app::LogLevel::Error, "chat", e.to_string());
+                    if let Some(cmd) = msg
+                        .strip_prefix('/')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                    {
+                        if let Err(e) = app.process_command(cmd) {
+                            app.log(crate::app::LogLevel::Error, "command", e.to_string());
+                            app.chat.debug(format!("✗ /{cmd}: {e}"));
+                        } else {
+                            app.chat.debug(format!("✓ /{cmd}"));
+                            app.auto_switch_tab();
+                        }
+                    } else {
+                        crate::chat_session::push_user_message(app, msg);
+                        if let Err(e) = crate::chat_session::start_chat_turn(app) {
+                            app.log(crate::app::LogLevel::Error, "chat", e.to_string());
+                        }
                     }
                 }
             }
@@ -697,6 +711,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
             }
             KeyCode::PageDown => {
                 app.chat.scroll = app.chat.scroll.saturating_sub(5);
+            }
+            KeyCode::Tab => {
+                if let Some(name) = crate::ui::chat::slash_command_completion(&app.chat.input) {
+                    app.chat.input = format!("/{name} ");
+                }
             }
             KeyCode::Char(c) => {
                 app.chat.input.push(c);
@@ -732,7 +751,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
                         app.set_status("Tutorial: now add a cylinder (open Create tab)");
                     }
                     crate::ui::welcome::WelcomeAction::BlankProject => {
-                        app.set_status("Ready — press : for commands, Tab for tools");
+                        app.set_status("Ready — press ` for chat (/cmd), Tab for tools");
                     }
                     crate::ui::welcome::WelcomeAction::OpenFile => {
                         // Enter command mode with "open" pre-filled
@@ -741,13 +760,13 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
                         app.command_selected_index = 0;
                     }
                     crate::ui::welcome::WelcomeAction::Dismiss => {
-                        app.set_status("Ready — press : for commands, Tab for tools");
+                        app.set_status("Ready — press ` for chat (/cmd), Tab for tools");
                     }
                 }
             }
             KeyCode::Esc | KeyCode::Char('q') => {
                 app.show_welcome = false;
-                app.set_status("Ready — press : for commands, Tab for tools");
+                app.set_status("Ready — press ` for chat (/cmd), Tab for tools");
             }
             _ => {}
         }
@@ -907,7 +926,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
                 KeyCode::Char('q') => {
                     return Ok(false); // signal quit
                 }
-                KeyCode::Char(':') | KeyCode::Char('/') => {
+                KeyCode::Char(':') => {
                     app.mode = TuiMode::Command;
                 }
                 KeyCode::Char('`') => {

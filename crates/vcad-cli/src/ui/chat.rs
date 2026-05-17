@@ -29,6 +29,267 @@ pub struct ChatLine {
     pub kind: ChatLineKind,
 }
 
+/// Slash-command suggestion shown while typing in the chat input.
+#[derive(Debug, Clone, Copy)]
+pub struct SlashCommandSuggestion {
+    pub name: &'static str,
+    pub usage: &'static str,
+    pub description: &'static str,
+    aliases: &'static [&'static str],
+}
+
+const SLASH_COMMANDS: &[SlashCommandSuggestion] = &[
+    SlashCommandSuggestion {
+        name: "cube",
+        usage: "cube [size]",
+        description: "Add cube",
+        aliases: &["box"],
+    },
+    SlashCommandSuggestion {
+        name: "cylinder",
+        usage: "cylinder [radius] [height]",
+        description: "Add cylinder",
+        aliases: &["cyl", "tube"],
+    },
+    SlashCommandSuggestion {
+        name: "sphere",
+        usage: "sphere [radius]",
+        description: "Add sphere",
+        aliases: &["ball"],
+    },
+    SlashCommandSuggestion {
+        name: "cone",
+        usage: "cone [radius] [height]",
+        description: "Add cone",
+        aliases: &[],
+    },
+    SlashCommandSuggestion {
+        name: "select",
+        usage: "select <id> [id...]",
+        description: "Select parts",
+        aliases: &[],
+    },
+    SlashCommandSuggestion {
+        name: "select_all",
+        usage: "select_all",
+        description: "Select all parts",
+        aliases: &["all"],
+    },
+    SlashCommandSuggestion {
+        name: "deselect",
+        usage: "deselect",
+        description: "Clear selection",
+        aliases: &["clear selection"],
+    },
+    SlashCommandSuggestion {
+        name: "delete",
+        usage: "delete",
+        description: "Delete selection",
+        aliases: &["del", "rm"],
+    },
+    SlashCommandSuggestion {
+        name: "move",
+        usage: "move <dx> <dy> <dz>",
+        description: "Move selection",
+        aliases: &["translate"],
+    },
+    SlashCommandSuggestion {
+        name: "rotate",
+        usage: "rotate <rx> <ry> <rz>",
+        description: "Rotate selection in degrees",
+        aliases: &["spin", "turn"],
+    },
+    SlashCommandSuggestion {
+        name: "scale",
+        usage: "scale [factor]",
+        description: "Scale selection uniformly",
+        aliases: &["resize"],
+    },
+    SlashCommandSuggestion {
+        name: "union",
+        usage: "union",
+        description: "Union selected parts",
+        aliases: &["combine"],
+    },
+    SlashCommandSuggestion {
+        name: "difference",
+        usage: "difference",
+        description: "Subtract selected parts",
+        aliases: &["subtract", "cut"],
+    },
+    SlashCommandSuggestion {
+        name: "intersection",
+        usage: "intersection",
+        description: "Intersect selected parts",
+        aliases: &["intersect"],
+    },
+    SlashCommandSuggestion {
+        name: "fillet",
+        usage: "fillet [radius]",
+        description: "Fillet selection",
+        aliases: &[],
+    },
+    SlashCommandSuggestion {
+        name: "chamfer",
+        usage: "chamfer [distance]",
+        description: "Chamfer selection",
+        aliases: &[],
+    },
+    SlashCommandSuggestion {
+        name: "shell",
+        usage: "shell [thickness]",
+        description: "Shell selection",
+        aliases: &[],
+    },
+    SlashCommandSuggestion {
+        name: "pattern",
+        usage: "pattern [count]",
+        description: "Pattern selection",
+        aliases: &[],
+    },
+    SlashCommandSuggestion {
+        name: "mirror",
+        usage: "mirror",
+        description: "Mirror selection",
+        aliases: &["flip"],
+    },
+    SlashCommandSuggestion {
+        name: "save",
+        usage: "save [path.vcad]",
+        description: "Save document",
+        aliases: &[],
+    },
+    SlashCommandSuggestion {
+        name: "export",
+        usage: "export <path.stl>",
+        description: "Export STL",
+        aliases: &["export_stl"],
+    },
+    SlashCommandSuggestion {
+        name: "undo",
+        usage: "undo",
+        description: "Undo",
+        aliases: &[],
+    },
+    SlashCommandSuggestion {
+        name: "redo",
+        usage: "redo",
+        description: "Redo",
+        aliases: &[],
+    },
+    SlashCommandSuggestion {
+        name: "new",
+        usage: "new",
+        description: "New document",
+        aliases: &[],
+    },
+    SlashCommandSuggestion {
+        name: "sketch",
+        usage: "sketch",
+        description: "Enter sketch mode",
+        aliases: &[],
+    },
+    SlashCommandSuggestion {
+        name: "clear_chat",
+        usage: "clear_chat",
+        description: "Clear chat history",
+        aliases: &["chat_clear"],
+    },
+    SlashCommandSuggestion {
+        name: "toggle_sidebar",
+        usage: "toggle_sidebar",
+        description: "Show/hide feature tree",
+        aliases: &[],
+    },
+    SlashCommandSuggestion {
+        name: "toggle_chat",
+        usage: "toggle_chat",
+        description: "Show/hide chat",
+        aliases: &[],
+    },
+    SlashCommandSuggestion {
+        name: "camera_iso",
+        usage: "camera_iso",
+        description: "Isometric camera",
+        aliases: &["iso"],
+    },
+    SlashCommandSuggestion {
+        name: "camera_top",
+        usage: "camera_top",
+        description: "Top camera",
+        aliases: &["top"],
+    },
+    SlashCommandSuggestion {
+        name: "camera_front",
+        usage: "camera_front",
+        description: "Front camera",
+        aliases: &["front"],
+    },
+    SlashCommandSuggestion {
+        name: "camera_right",
+        usage: "camera_right",
+        description: "Right camera",
+        aliases: &["right"],
+    },
+    SlashCommandSuggestion {
+        name: "camera_fit",
+        usage: "camera_fit",
+        description: "Fit camera",
+        aliases: &["fit"],
+    },
+    SlashCommandSuggestion {
+        name: "cycle_theme",
+        usage: "cycle_theme",
+        description: "Cycle theme",
+        aliases: &["theme"],
+    },
+    SlashCommandSuggestion {
+        name: "quit",
+        usage: "quit",
+        description: "Quit",
+        aliases: &["q"],
+    },
+];
+
+/// Return slash-command suggestions for the current chat input.
+pub fn slash_command_suggestions(input: &str) -> Vec<SlashCommandSuggestion> {
+    let Some(rest) = input.strip_prefix('/') else {
+        return Vec::new();
+    };
+    let query = rest
+        .trim_start()
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
+    if query.is_empty() {
+        return SLASH_COMMANDS.iter().copied().take(6).collect();
+    }
+
+    let mut exactish: Vec<_> = SLASH_COMMANDS
+        .iter()
+        .copied()
+        .filter(|cmd| {
+            cmd.name.starts_with(&query)
+                || cmd.aliases.iter().any(|alias| alias.starts_with(&query))
+        })
+        .collect();
+    let fuzzy = SLASH_COMMANDS.iter().copied().filter(|cmd| {
+        !(cmd.name.starts_with(&query) || cmd.aliases.iter().any(|alias| alias.starts_with(&query)))
+            && (cmd.name.contains(&query)
+                || cmd.description.to_lowercase().contains(&query)
+                || cmd.aliases.iter().any(|alias| alias.contains(&query)))
+    });
+    exactish.extend(fuzzy);
+    exactish.truncate(6);
+    exactish
+}
+
+/// Completion text for Tab in the chat input.
+pub fn slash_command_completion(input: &str) -> Option<&'static str> {
+    slash_command_suggestions(input).first().map(|cmd| cmd.name)
+}
+
 /// Persistent chat sidebar state.
 pub struct ChatPanel {
     /// Whether the sidebar is rendered.
@@ -384,6 +645,8 @@ pub fn draw_chat(buf: &mut CellBuffer, panel: &ChatPanel, in_flight: bool, area:
         }
     }
 
+    draw_slash_command_suggestions(buf, panel, left, right, top, input_sep_y);
+
     // Input line on bottom border row
     for x in (left + 1)..right {
         set_char(buf, x, input_y, ' ', theme::SURFACE(), theme::SURFACE());
@@ -452,7 +715,7 @@ pub fn draw_chat(buf: &mut CellBuffer, panel: &ChatPanel, in_flight: bool, area:
     }
 
     // Hint
-    let hint = "`/Esc close";
+    let hint = "/cmd  Tab complete  Esc close";
     let hint_x = inner_right.saturating_sub(hint.len() as u16 + 1);
     if hint_x > cursor_x + 2 {
         for (j, ch) in hint.chars().enumerate() {
@@ -464,6 +727,60 @@ pub fn draw_chat(buf: &mut CellBuffer, panel: &ChatPanel, in_flight: bool, area:
                 theme::TEXT_MUTED(),
                 theme::SURFACE(),
             );
+        }
+    }
+}
+
+fn draw_slash_command_suggestions(
+    buf: &mut CellBuffer,
+    panel: &ChatPanel,
+    left: u16,
+    right: u16,
+    top: u16,
+    input_sep_y: u16,
+) {
+    let suggestions = slash_command_suggestions(&panel.input);
+    if suggestions.is_empty() || input_sep_y <= top + 2 {
+        return;
+    }
+
+    let max_rows = suggestions.len().min(5);
+    let start_y = input_sep_y.saturating_sub(max_rows as u16);
+    let inner_left = left + 1;
+    let inner_right = right;
+
+    for (row, suggestion) in suggestions.iter().take(max_rows).enumerate() {
+        let y = start_y + row as u16;
+        if y <= top || y >= input_sep_y {
+            continue;
+        }
+
+        for x in (left + 1)..right {
+            set_char(buf, x, y, ' ', theme::CARD(), theme::CARD());
+        }
+
+        let usage = format!("/{}", suggestion.usage);
+        let mut cx = inner_left + 1;
+        for ch in usage.chars() {
+            if cx >= inner_right {
+                break;
+            }
+            set_char(buf, cx, y, ch, theme::TEXT(), theme::CARD());
+            cx += 1;
+        }
+
+        let desc_x = inner_right.saturating_sub(suggestion.description.len() as u16 + 1);
+        if desc_x > cx + 1 {
+            for (i, ch) in suggestion.description.chars().enumerate() {
+                set_char(
+                    buf,
+                    desc_x + i as u16,
+                    y,
+                    ch,
+                    theme::TEXT_MUTED(),
+                    theme::CARD(),
+                );
+            }
         }
     }
 }

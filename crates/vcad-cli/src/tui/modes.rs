@@ -11,7 +11,7 @@ pub enum TuiMode {
     /// Normal 3D editing mode - primitives, booleans, transforms
     #[default]
     Normal,
-    /// Command input mode (: or / pressed)
+    /// Command input mode (: pressed, or slash-prefixed command submitted from chat)
     Command,
     /// Sketch mode - 2D constraint-based drawing
     ///
@@ -46,7 +46,7 @@ impl TuiMode {
     /// Get hotkey hints for the current mode.
     pub fn hotkey_hints(&self) -> &'static str {
         match self {
-            TuiMode::Normal => "1-3:prim  u/r:undo  wasd:move  Tab:select  ::cmd  q:quit",
+            TuiMode::Normal => "1-3:prim  u/r:undo  wasd:move  Tab:select  `:chat  :cmd  q:quit",
             TuiMode::Command => "Enter:exec  Esc:cancel",
             TuiMode::Sketch(_) => "l:line  r:rect  c:circ  h:horiz  v:vert  x:extrude  Esc:exit",
             TuiMode::Assembly(_) => "i:instance  j:joint  LeftRight:adjust  k:FK  Esc:exit",
