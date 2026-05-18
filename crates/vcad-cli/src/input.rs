@@ -86,7 +86,8 @@ pub fn hit_test(app: &App, area: Rect, col: u16, row: u16) -> HitRegion {
     }
 
     // Bottom toolbar
-    let toolbar_rect = crate::ui::toolbar::toolbar_rect(area, app.active_tab);
+    let toolbar_rect =
+        crate::ui::toolbar::toolbar_rect_for(area, app.active_tab, app.tool_input.is_some());
     if row >= toolbar_rect.y
         && row < toolbar_rect.y + toolbar_rect.height
         && col >= toolbar_rect.x
@@ -127,15 +128,20 @@ pub fn hit_test(app: &App, area: Rect, col: u16, row: u16) -> HitRegion {
     // Sidebar
     if app.sidebar_visible {
         let parts = app.get_parts();
-        let sb_rect = crate::ui::tree::sidebar_rect(area, parts.len());
+        let sidebar_top = toolbar_rect.y + toolbar_rect.height + 1;
+        let sb_rect = crate::ui::tree::sidebar_rect(area, parts.len(), sidebar_top);
         if row >= sb_rect.y
             && row < sb_rect.y + sb_rect.height
             && col >= sb_rect.x
             && col < sb_rect.x + sb_rect.width
         {
-            if let Some(idx) =
-                crate::ui::tree::part_at_row(area, parts.len(), app.sidebar_scroll, row)
-            {
+            if let Some(idx) = crate::ui::tree::part_at_row(
+                area,
+                parts.len(),
+                app.sidebar_scroll,
+                row,
+                sidebar_top,
+            ) {
                 return HitRegion::Sidebar(idx);
             }
         }
@@ -319,6 +325,13 @@ fn handle_sub_tool_click(app: &mut App, tool_idx: usize) -> anyhow::Result<bool>
                 "export {}".to_string(),
             ));
         }
+        "render" => {
+            app.tool_input = Some(ToolInput::text(
+                "Render PNG",
+                "vcad-render.png",
+                "render {}".to_string(),
+            ));
+        }
 
         // Assembly / Simulate stubs
         "__assembly_stub" => {
@@ -390,6 +403,7 @@ pub fn handle_mouse(
                 HitRegion::Sidebar(part_idx) => {
                     let parts = app.get_parts();
                     if part_idx < parts.len() {
+                        let selection_before = app.selected.clone();
                         let id = parts[part_idx].0;
                         if event.modifiers.contains(KeyModifiers::SHIFT) {
                             if app.selected.contains(&id) {
@@ -400,6 +414,9 @@ pub fn handle_mouse(
                         } else {
                             app.selected.clear();
                             app.selected.insert(id);
+                        }
+                        if app.selected != selection_before {
+                            app.render_dirty = true;
                         }
                         app.focused_part_index = part_idx;
                         app.auto_switch_tab();
@@ -431,6 +448,7 @@ pub fn handle_mouse(
                         app.set_status("Camera reset");
                     } else {
                         // Click-to-select via pick buffer
+                        let selection_before = app.selected.clone();
                         let pick_id = if let Some((cw, ch)) = cell_dims {
                             render_buffer.pick_at_for_protocol(col, row, cw, ch)
                         } else {
@@ -451,6 +469,9 @@ pub fn handle_mouse(
                             app.set_status(format!("{} selected", app.selected.len()));
                         } else {
                             app.selected.clear();
+                        }
+                        if app.selected != selection_before {
+                            app.render_dirty = true;
                         }
                         app.auto_switch_tab();
                     }
@@ -929,6 +950,15 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
                 KeyCode::Char(':') => {
                     app.mode = TuiMode::Command;
                 }
+                KeyCode::Char('/') => {
+                    // Open/focus chat and seed the slash-command prefix,
+                    // mirroring ':' opening the command palette.
+                    app.chat.open = true;
+                    app.chat.focused = true;
+                    if app.chat.input.is_empty() {
+                        app.chat.input.push('/');
+                    }
+                }
                 KeyCode::Char('`') => {
                     // Open and focus the chat sidebar.
                     app.chat.open = true;
@@ -1023,14 +1053,21 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
                 KeyCode::Tab => {
                     let parts = app.get_parts();
                     if !parts.is_empty() {
+                        let selection_before = app.selected.clone();
                         app.focused_part_index = (app.focused_part_index + 1) % parts.len();
                         app.selected.clear();
                         app.selected.insert(parts[app.focused_part_index].0);
+                        if app.selected != selection_before {
+                            app.render_dirty = true;
+                        }
                         app.auto_switch_tab();
                     }
                 }
                 KeyCode::Esc => {
-                    app.selected.clear();
+                    if !app.selected.is_empty() {
+                        app.selected.clear();
+                        app.render_dirty = true;
+                    }
                     app.auto_switch_tab();
                 }
                 KeyCode::Enter | KeyCode::Char(' ') => {
@@ -1042,17 +1079,20 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
                         } else {
                             app.selected.insert(id);
                         }
+                        app.render_dirty = true;
                         app.set_status(format!("{} selected", app.selected.len()));
                         app.auto_switch_tab();
                     }
                 }
-                // WASD translation
-                KeyCode::Char('w') => app.translate_selected(0.0, 0.0, 5.0)?,
+                // WASD translation on the X/Z plane. PageUp/PageDown move on Y.
+                KeyCode::Char('w') => app.translate_selected(0.0, 0.0, -5.0)?,
                 KeyCode::Char('s') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    app.translate_selected(0.0, 0.0, -5.0)?
+                    app.translate_selected(0.0, 0.0, 5.0)?
                 }
                 KeyCode::Char('a') => app.translate_selected(-5.0, 0.0, 0.0)?,
                 KeyCode::Char('d') => app.translate_selected(5.0, 0.0, 0.0)?,
+                KeyCode::PageUp => app.translate_selected(0.0, 5.0, 0.0)?,
+                KeyCode::PageDown => app.translate_selected(0.0, -5.0, 0.0)?,
                 KeyCode::Char('t') => {
                     let mode_name = crate::ui::theme::toggle();
                     app.render_dirty = true;

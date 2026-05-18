@@ -915,6 +915,34 @@ impl App {
         Ok(())
     }
 
+    /// Render the current viewport to a PNG file.
+    pub fn render_png(&mut self, path: &std::path::Path, width: u32, height: u32) -> Result<bool> {
+        let triangles = self.get_triangles();
+        if triangles.is_empty() {
+            self.set_status("No geometry to render");
+            return Ok(false);
+        }
+
+        let mut buffer = RenderBuffer::new(width.max(1), height.max(1));
+        let bg = crate::ui::theme::BG_RGB();
+        buffer.clear(bg.0, bg.1, bg.2);
+        crate::render::render_scene(&mut buffer, &triangles, &self.camera);
+
+        let gfx = GraphicsOutput::new();
+        gfx.save_png(&buffer, path)?;
+        self.set_status(format!("Rendered to {}", path.display()));
+        Ok(true)
+    }
+
+    /// Best-effort open of a rendered file in the OS default viewer/browser.
+    pub fn open_rendered_file(&mut self, path: &std::path::Path) {
+        let result = open_path(path);
+        match result {
+            Ok(()) => self.set_status(format!("Opened {}", path.display())),
+            Err(e) => self.set_status(format!("Rendered {} (open failed: {e})", path.display())),
+        }
+    }
+
     /// Evaluate the document to get meshes.
     pub fn evaluate(&mut self) -> Result<()> {
         self.meshes = evaluate_document(&self.document)?;
@@ -1147,6 +1175,43 @@ impl App {
                     self.set_status("Usage: export <path.stl>");
                 }
             }
+            "render" | "screenshot" => {
+                if parts.len() == 1 {
+                    self.tool_input = Some(ToolInput::text(
+                        "Render PNG",
+                        "vcad-render.png",
+                        "render {}".to_string(),
+                    ));
+                    self.set_status("Render PNG: enter output path");
+                    return Ok(());
+                }
+
+                let mut path = PathBuf::from("vcad-render.png");
+                let mut width = 1920;
+                let mut height = 1080;
+                let mut open = true;
+
+                for arg in &parts[1..] {
+                    if *arg == "--open" || *arg == "open" {
+                        open = true;
+                    } else if *arg == "--no-open" || *arg == "no-open" {
+                        open = false;
+                    } else if let Some((w, h)) = arg.split_once('x') {
+                        if let (Ok(w), Ok(h)) = (w.parse::<u32>(), h.parse::<u32>()) {
+                            width = w;
+                            height = h;
+                        }
+                    } else if let Ok(w) = arg.parse::<u32>() {
+                        width = w;
+                    } else {
+                        path = PathBuf::from(arg);
+                    }
+                }
+
+                if self.render_png(&path, width, height)? && open {
+                    self.open_rendered_file(&path);
+                }
+            }
             "undo" => self.undo()?,
             "redo" => self.redo()?,
             "quit" | "q" => {
@@ -1172,6 +1237,7 @@ impl App {
                 if parts.len() < 2 {
                     self.set_status("Usage: select <id> [id...]");
                 } else {
+                    let selection_before = self.selected.clone();
                     let valid_roots: std::collections::HashSet<_> =
                         self.get_parts().into_iter().map(|(id, _)| id).collect();
                     self.selected.clear();
@@ -1182,17 +1248,27 @@ impl App {
                             }
                         }
                     }
+                    if self.selected != selection_before {
+                        self.render_dirty = true;
+                    }
                     self.set_status(format!("Selected {} parts", self.selected.len()));
                     self.auto_switch_tab();
                 }
             }
             "select_all" => {
+                let selection_before = self.selected.clone();
                 let ids: Vec<_> = self.get_parts().into_iter().map(|(id, _)| id).collect();
                 self.selected = ids.into_iter().collect();
+                if self.selected != selection_before {
+                    self.render_dirty = true;
+                }
                 self.set_status(format!("Selected {} parts", self.selected.len()));
             }
             "deselect" => {
-                self.selected.clear();
+                if !self.selected.is_empty() {
+                    self.selected.clear();
+                    self.render_dirty = true;
+                }
                 self.set_status("Deselected");
             }
             "toggle_sidebar" => {
@@ -1267,6 +1343,26 @@ impl App {
 
         Ok(())
     }
+}
+
+fn open_path(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    let mut cmd = std::process::Command::new("open");
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", "start", ""]);
+        c
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = std::process::Command::new("xdg-open");
+
+    cmd.arg(path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
 }
 
 /// Evaluate a document to meshes using the canonical vcad-eval evaluator.

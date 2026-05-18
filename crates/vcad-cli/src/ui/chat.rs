@@ -166,6 +166,12 @@ const SLASH_COMMANDS: &[SlashCommandSuggestion] = &[
         aliases: &["export_stl"],
     },
     SlashCommandSuggestion {
+        name: "render",
+        usage: "render <path.png> [WIDTHxHEIGHT] [--no-open]",
+        description: "Render PNG image",
+        aliases: &["screenshot", "image", "png"],
+    },
+    SlashCommandSuggestion {
         name: "undo",
         usage: "undo",
         description: "Undo",

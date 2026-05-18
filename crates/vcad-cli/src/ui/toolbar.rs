@@ -297,6 +297,13 @@ pub fn sub_tools(tab: usize) -> &'static [SubTool] {
                 needs_selection: false,
             },
             SubTool {
+                icon: "\u{1F5BC}",
+                label: "Render",
+                command: "render",
+                shortcut: None,
+                needs_selection: false,
+            },
+            SubTool {
                 icon: "\u{1F4BE}",
                 label: "Save",
                 command: "save",
@@ -621,10 +628,24 @@ pub fn sub_tool_at(active_area: Rect, active_tab: usize, col: u16, row: u16) -> 
     None
 }
 
-/// Rect covering the flush tool strip. Width = full area; height = 2 when the
-/// active tab has a sub-row, else 1. Anchored at row 1 under the menu bar.
-pub fn toolbar_rect(area: Rect, active_tab: usize) -> Rect {
+/// Height of the flush tool strip for the current mode.
+pub fn toolbar_height(active_tab: usize, has_tool_input: bool) -> u16 {
     let tools = sub_tools(active_tab);
-    let height: u16 = if tools.is_empty() { 1 } else { 2 };
-    Rect::new(area.x, area.y + TAB_ROW_OFFSET, area.width, height)
+    if !tools.is_empty() || has_tool_input {
+        2
+    } else {
+        1
+    }
+}
+
+/// Rect covering the flush tool strip. Width = full area; height = 2 when the
+/// active tab has a sub-row or inline input, else 1. Anchored at row 1 under
+/// the menu bar.
+pub fn toolbar_rect_for(area: Rect, active_tab: usize, has_tool_input: bool) -> Rect {
+    Rect::new(
+        area.x,
+        area.y + TAB_ROW_OFFSET,
+        area.width,
+        toolbar_height(active_tab, has_tool_input),
+    )
 }

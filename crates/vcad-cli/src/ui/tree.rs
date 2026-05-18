@@ -16,18 +16,9 @@ pub fn draw_sidebar(
     scroll: usize,
     mouse_row: Option<u16>,
     area: Rect,
+    top_y: u16,
 ) {
-    let sidebar_width = 32u16;
-    let max_visible = parts.len().min(20);
-    let sidebar_height = (max_visible + 2) as u16;
-    let sidebar_height = sidebar_height.max(4).min(area.height.saturating_sub(6));
-
-    let rect = Rect::new(
-        area.x + 1,
-        area.y + 2,
-        sidebar_width.min(area.width.saturating_sub(2)),
-        sidebar_height,
-    );
+    let rect = sidebar_rect(area, parts.len(), top_y);
 
     render_sidebar(buf, rect, parts, selected, focused_index, scroll, mouse_row);
 }
@@ -206,23 +197,32 @@ fn part_icon(name: &str) -> (char, Color) {
 }
 
 /// Returns the Rect of the sidebar for hit-testing.
-pub fn sidebar_rect(area: Rect, parts_count: usize) -> Rect {
+pub fn sidebar_rect(area: Rect, parts_count: usize, top_y: u16) -> Rect {
     let sidebar_width = 32u16;
     let max_visible = parts_count.min(20);
-    let sidebar_height = (max_visible + 2) as u16;
-    let sidebar_height = sidebar_height.max(4).min(area.height.saturating_sub(6));
+    let desired_height = ((max_visible + 2) as u16).max(4);
+    let status_y = area.y + area.height.saturating_sub(1);
+    let top = top_y.min(status_y);
+    let available_height = status_y.saturating_sub(top);
+    let sidebar_height = desired_height.min(available_height);
 
     Rect::new(
         area.x + 1,
-        area.y + 2,
+        top,
         sidebar_width.min(area.width.saturating_sub(2)),
         sidebar_height,
     )
 }
 
 /// Returns the part index at the given row, if any.
-pub fn part_at_row(area: Rect, parts_count: usize, scroll: usize, row: u16) -> Option<usize> {
-    let rect = sidebar_rect(area, parts_count);
+pub fn part_at_row(
+    area: Rect,
+    parts_count: usize,
+    scroll: usize,
+    row: u16,
+    top_y: u16,
+) -> Option<usize> {
+    let rect = sidebar_rect(area, parts_count, top_y);
     if row <= rect.y || row >= rect.y + rect.height - 1 {
         return None;
     }

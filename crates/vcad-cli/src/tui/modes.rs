@@ -46,7 +46,9 @@ impl TuiMode {
     /// Get hotkey hints for the current mode.
     pub fn hotkey_hints(&self) -> &'static str {
         match self {
-            TuiMode::Normal => "1-3:prim  u/r:undo  wasd:move  Tab:select  `:chat  :cmd  q:quit",
+            TuiMode::Normal => {
+                "1-3:prim  u/r:undo  wasd:move XZ  PgUp/Dn:Y  Tab:select  `:chat  :cmd"
+            }
             TuiMode::Command => "Enter:exec  Esc:cancel",
             TuiMode::Sketch(_) => "l:line  r:rect  c:circ  h:horiz  v:vert  x:extrude  Esc:exit",
             TuiMode::Assembly(_) => "i:instance  j:joint  LeftRight:adjust  k:FK  Esc:exit",

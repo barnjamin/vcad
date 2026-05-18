@@ -64,6 +64,9 @@ fn draw_overlays_with_area(buf: &mut CellBuffer, app: &App, area: Rect) {
         // Sidebar (toggleable)
         if app.sidebar_visible {
             let parts = app.get_parts();
+            let toolbar_rect =
+                toolbar::toolbar_rect_for(area, app.active_tab, app.tool_input.is_some());
+            let sidebar_top = toolbar_rect.y + toolbar_rect.height + 1;
             tree::draw_sidebar(
                 buf,
                 &parts,
@@ -72,6 +75,7 @@ fn draw_overlays_with_area(buf: &mut CellBuffer, app: &App, area: Rect) {
                 app.sidebar_scroll,
                 Some(app.mouse_pos.1),
                 area,
+                sidebar_top,
             );
         }
 
