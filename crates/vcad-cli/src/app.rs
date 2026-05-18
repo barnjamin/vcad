@@ -925,7 +925,7 @@ impl App {
     /// Get triangles for rendering, with pick IDs per mesh.
     pub fn get_triangles(&self) -> Vec<Triangle> {
         let mut triangles = Vec::new();
-        let color = [180u8, 180, 190];
+        let color = [145u8, 190, 225];
 
         for (mesh_idx, mesh) in self.meshes.iter().enumerate() {
             let pick_id = if mesh_idx < self.document.roots.len() {
@@ -935,7 +935,7 @@ impl App {
             };
 
             let mesh_color = if self.selected.contains(&(pick_id as u64)) {
-                [220u8, 100, 140]
+                [255u8, 125, 175]
             } else {
                 color
             };
