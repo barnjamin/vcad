@@ -79,7 +79,7 @@ const SLASH_COMMANDS: &[SlashCommandSuggestion] = &[
         name: "deselect",
         usage: "deselect",
         description: "Clear selection",
-        aliases: &["clear selection"],
+        aliases: &["clear_selection"],
     },
     SlashCommandSuggestion {
         name: "delete",

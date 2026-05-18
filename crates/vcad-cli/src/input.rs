@@ -695,12 +695,20 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
                         .map(str::trim)
                         .filter(|s| !s.is_empty())
                     {
+                        let had_tool_input = app.tool_input.is_some();
                         if let Err(e) = app.process_command(cmd) {
                             app.log(crate::app::LogLevel::Error, "command", e.to_string());
                             app.chat.debug(format!("✗ /{cmd}: {e}"));
                         } else {
+                            let opened_tool_input = !had_tool_input && app.tool_input.is_some();
                             app.chat.debug(format!("✓ /{cmd}"));
                             app.auto_switch_tab();
+                            if opened_tool_input {
+                                // Slash commands like /render can open inline toolbar input.
+                                // Give that input keyboard focus instead of trapping typing in chat.
+                                app.chat.open = false;
+                                app.chat.focused = false;
+                            }
                         }
                     } else {
                         crate::chat_session::push_user_message(app, msg);

@@ -1106,12 +1106,12 @@ impl App {
                 let size = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(20.0);
                 self.add_cube(size)?;
             }
-            "cylinder" | "cyl" | "add cylinder" => {
+            "cylinder" | "cyl" | "tube" | "add cylinder" => {
                 let radius = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(10.0);
                 let height = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(20.0);
                 self.add_cylinder(radius, height)?;
             }
-            "sphere" | "add sphere" => {
+            "sphere" | "ball" | "add sphere" => {
                 let radius = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(10.0);
                 self.add_sphere(radius)?;
             }
@@ -1129,18 +1129,18 @@ impl App {
                 let dz = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0.0);
                 self.translate_selected(dx, dy, dz)?;
             }
-            "rotate" => {
+            "rotate" | "spin" | "turn" => {
                 let rx = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0.0);
                 let ry = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0.0);
                 let rz = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0.0);
                 self.rotate_selected(rx, ry, rz)?;
             }
-            "scale" => {
+            "scale" | "resize" => {
                 let s = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(2.0);
                 self.scale_selected(s, s, s)?;
             }
-            "union" => self.boolean_union()?,
-            "difference" | "subtract" => self.boolean_difference()?,
+            "union" | "combine" => self.boolean_union()?,
+            "difference" | "subtract" | "cut" => self.boolean_difference()?,
             "intersection" | "intersect" => self.boolean_intersection()?,
             "fillet" => {
                 let r = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(2.0);
@@ -1158,7 +1158,7 @@ impl App {
                 let count = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(3);
                 self.pattern_selected(count)?;
             }
-            "mirror" => self.mirror_selected()?,
+            "mirror" | "flip" => self.mirror_selected()?,
             "save" => {
                 if let Some(path) = parts.get(1) {
                     self.save_as(PathBuf::from(path))?;
@@ -1166,7 +1166,7 @@ impl App {
                     self.save()?;
                 }
             }
-            "export" => {
+            "export" | "export_stl" => {
                 if let Some(path) = parts.get(1) {
                     let path = PathBuf::from(path);
                     self.export_stl(&path)?;
@@ -1175,7 +1175,7 @@ impl App {
                     self.set_status("Usage: export <path.stl>");
                 }
             }
-            "render" | "screenshot" => {
+            "render" | "screenshot" | "image" | "png" => {
                 if parts.len() == 1 {
                     self.tool_input = Some(ToolInput::text(
                         "Render PNG",
@@ -1255,7 +1255,7 @@ impl App {
                     self.auto_switch_tab();
                 }
             }
-            "select_all" => {
+            "select_all" | "all" => {
                 let selection_before = self.selected.clone();
                 let ids: Vec<_> = self.get_parts().into_iter().map(|(id, _)| id).collect();
                 self.selected = ids.into_iter().collect();
@@ -1264,7 +1264,7 @@ impl App {
                 }
                 self.set_status(format!("Selected {} parts", self.selected.len()));
             }
-            "deselect" => {
+            "deselect" | "clear_selection" => {
                 if !self.selected.is_empty() {
                     self.selected.clear();
                     self.render_dirty = true;
@@ -1293,31 +1293,31 @@ impl App {
                 self.set_status("Chat cleared");
             }
             "toggle_wireframe" => self.set_status("Wireframe: not yet implemented in TUI"),
-            "cycle_theme" => {
+            "cycle_theme" | "theme" => {
                 let name = crate::ui::theme::toggle();
                 self.set_status(format!("Theme: {name}"));
             }
-            "camera_iso" => {
+            "camera_iso" | "iso" => {
                 self.camera
                     .set_orbit(45.0, 30.0, 100.0, crate::render::Vec3::new(0.0, 0.0, 0.0));
                 self.set_status("Isometric view");
             }
-            "camera_top" => {
+            "camera_top" | "top" => {
                 self.camera
                     .set_orbit(0.0, 89.0, 100.0, crate::render::Vec3::new(0.0, 0.0, 0.0));
                 self.set_status("Top view");
             }
-            "camera_front" => {
+            "camera_front" | "front" => {
                 self.camera
                     .set_orbit(0.0, 0.0, 100.0, crate::render::Vec3::new(0.0, 0.0, 0.0));
                 self.set_status("Front view");
             }
-            "camera_right" => {
+            "camera_right" | "right" => {
                 self.camera
                     .set_orbit(90.0, 0.0, 100.0, crate::render::Vec3::new(0.0, 0.0, 0.0));
                 self.set_status("Right view");
             }
-            "camera_fit" => {
+            "camera_fit" | "fit" => {
                 self.camera.zoom_to_fit(80, 40);
                 self.set_status("Fit to screen");
             }
@@ -1429,6 +1429,11 @@ pub fn evaluate_document_timed(
 pub fn run_tui(file: Option<PathBuf>) -> Result<()> {
     crate::ui::theme::init();
 
+    // Load/evaluate the document before taking over the terminal. If the file
+    // is missing or invalid, the error can print normally and the shell is not
+    // left in raw mode / alt-screen.
+    let mut app = App::new(file)?;
+
     // Install panic + stderr capture BEFORE entering alt-screen. Any early
     // stderr writes (e.g. from a failing terminal capability probe) end up
     // in the log store instead of corrupting the cell buffer.
@@ -1436,30 +1441,34 @@ pub fn run_tui(file: Option<PathBuf>) -> Result<()> {
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(
+    if let Err(e) = execute!(
         stdout,
         EnterAlternateScreen,
         EnableMouseCapture,
         cursor::Hide
-    )?;
-
-    let mut app = App::new(file)?;
+    ) {
+        let _ = disable_raw_mode();
+        return Err(e.into());
+    }
 
     let result = run_loop(&mut stdout, &mut app, &capture);
 
-    disable_raw_mode()?;
-    execute!(
+    let cleanup_result = execute!(
         stdout,
         LeaveAlternateScreen,
         DisableMouseCapture,
         cursor::Show
-    )?;
+    );
+    let raw_result = disable_raw_mode();
 
     // `capture` drops here — fd 2 is restored before we return so any
     // error printed by the caller goes to the real tty.
     drop(capture);
 
-    result
+    result?;
+    cleanup_result?;
+    raw_result?;
+    Ok(())
 }
 
 fn run_loop(
