@@ -839,7 +839,9 @@ impl App {
         }
         self.push_undo();
 
-        for &selected_id in &self.selected.clone() {
+        let selected_ids: Vec<_> = self.selected.iter().copied().collect();
+        let mut moved_mesh_indices = Vec::new();
+        for selected_id in selected_ids {
             if let Some(idx) = self
                 .document
                 .roots
@@ -847,8 +849,55 @@ impl App {
                 .position(|e| e.root == selected_id)
             {
                 let old_root = self.document.roots[idx].root;
-                let new_id = self.alloc_node_id();
 
+                // Keyboard nudging used to wrap the root in a fresh Translate
+                // node on every key repeat. That makes documents grow linearly
+                // while moving a part and forces increasingly expensive evals
+                // for something that is semantically just one accumulated
+                // offset. Coalesce the whole adjacent root Translate chain into
+                // one node; this also repairs files that already contain a long
+                // nudge history.
+                if let Some(Node {
+                    op:
+                        CsgOp::Translate {
+                            child: root_child,
+                            offset: root_offset,
+                        },
+                    ..
+                }) = self.document.nodes.get(&old_root)
+                {
+                    let mut accumulated =
+                        Vec3::new(root_offset.x + dx, root_offset.y + dy, root_offset.z + dz);
+                    let mut collapsed_child = *root_child;
+
+                    while let Some(Node {
+                        op:
+                            CsgOp::Translate {
+                                child: next_child,
+                                offset,
+                            },
+                        ..
+                    }) = self.document.nodes.get(&collapsed_child)
+                    {
+                        accumulated.x += offset.x;
+                        accumulated.y += offset.y;
+                        accumulated.z += offset.z;
+                        collapsed_child = *next_child;
+                    }
+
+                    if let Some(Node {
+                        op: CsgOp::Translate { child, offset },
+                        ..
+                    }) = self.document.nodes.get_mut(&old_root)
+                    {
+                        *child = collapsed_child;
+                        *offset = accumulated;
+                    }
+                    moved_mesh_indices.push(idx);
+                    continue;
+                }
+
+                let new_id = self.alloc_node_id();
                 self.document.nodes.insert(
                     new_id,
                     Node {
@@ -868,10 +917,33 @@ impl App {
                 self.document.roots[idx].root = new_id;
                 self.selected.remove(&selected_id);
                 self.selected.insert(new_id);
+                moved_mesh_indices.push(idx);
             }
         }
 
-        self.evaluate()?;
+        // Translation does not change topology or tessellation. Updating the
+        // cached mesh positions avoids a full BRep re-evaluation on every key
+        // repeat; wtf.vcad spends seconds rebuilding its patterned solid even
+        // though a keyboard nudge only changes the root transform.
+        if moved_mesh_indices.is_empty() {
+            return Ok(());
+        }
+        for idx in moved_mesh_indices {
+            if let Some(mesh) = self.meshes.get_mut(idx) {
+                for vertex in mesh.vertices.chunks_mut(3) {
+                    if let [x, y, z] = vertex {
+                        *x += dx as f32;
+                        *y += dy as f32;
+                        *z += dz as f32;
+                    }
+                }
+            } else {
+                self.evaluate()?;
+                self.set_status(format!("Translated by ({}, {}, {})", dx, dy, dz));
+                return Ok(());
+            }
+        }
+        self.render_dirty = true;
         self.set_status(format!("Translated by ({}, {}, {})", dx, dy, dz));
         Ok(())
     }

@@ -383,11 +383,14 @@ fn render_silhouette_outline(buffer: &mut RenderBuffer) {
         return;
     }
 
-    let source = buffer.pixels.clone();
     let width = buffer.width as usize;
     let height = buffer.height as usize;
-    let mut outline = Vec::new();
 
+    // This pass is on the hot path for keyboard nudges/camera moves. It used
+    // to clone the full RGBA buffer and allocate a second outline index list on
+    // every frame; at Kitty/iTerm pixel resolutions that is several megabytes
+    // of churn per key repeat. Edge detection only reads pick/depth buffers, so
+    // it is safe to darken each outline pixel in place as soon as it is found.
     for y in 1..height - 1 {
         for x in 1..width - 1 {
             let idx = y * width + x;
@@ -409,16 +412,12 @@ fn render_silhouette_outline(buffer: &mut RenderBuffer) {
             }
 
             if edge {
-                outline.push(idx);
+                let base = idx * 4;
+                buffer.pixels[base] = ((buffer.pixels[base] as f32) * 0.55) as u8;
+                buffer.pixels[base + 1] = ((buffer.pixels[base + 1] as f32) * 0.58) as u8;
+                buffer.pixels[base + 2] = ((buffer.pixels[base + 2] as f32) * 0.65) as u8;
             }
         }
-    }
-
-    for idx in outline {
-        let base = idx * 4;
-        buffer.pixels[base] = ((source[base] as f32) * 0.55) as u8;
-        buffer.pixels[base + 1] = ((source[base + 1] as f32) * 0.58) as u8;
-        buffer.pixels[base + 2] = ((source[base + 2] as f32) * 0.65) as u8;
     }
 }
 
