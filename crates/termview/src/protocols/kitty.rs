@@ -40,7 +40,18 @@ impl KittyImage {
     /// (requires `set -g allow-passthrough on` in tmux.conf).
     pub fn display(&self, stdout: &mut impl Write, in_tmux: bool) -> io::Result<()> {
         // Kitty protocol: ESC_G<payload>ESC\
-        // a=T (transmit), f=32 (RGBA), s=width, v=height, i=id
+        // a=T (transmit), f=32 (RGBA), s=width, v=height, i=id.
+        // z=-1 places the viewport below terminal text. Ghostty composites
+        // image rendering asynchronously, so the image can otherwise appear on
+        // top of subsequently-written menus/chat even though we flush text
+        // after the image sequence.
+
+        let delete_seq = format!("\x1b_Ga=d,d=i,i={},q=2\x1b\\", self.id);
+        if in_tmux {
+            write!(stdout, "{}", tmux_wrap(&delete_seq))?;
+        } else {
+            write!(stdout, "{}", delete_seq)?;
+        }
 
         let b64 = STANDARD.encode(&self.data);
         let chunk_size = 4096;
@@ -55,7 +66,7 @@ impl KittyImage {
             let seq = if i == 0 {
                 // First chunk: include all parameters
                 format!(
-                    "\x1b_Ga=T,f=32,s={},v={},i={},{};{}\x1b\\",
+                    "\x1b_Ga=T,f=32,s={},v={},i={},z=-1,q=2,{};{}\x1b\\",
                     self.width, self.height, self.id, more, chunk_str
                 )
             } else {

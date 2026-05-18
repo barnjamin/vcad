@@ -168,6 +168,23 @@ impl CellBuffer {
             cell.ch = ' ';
             cell.fg = theme::TEXT();
             cell.bg = bg;
+            cell.underline = false;
+        }
+    }
+
+    /// Start a text-overlay frame for pixel-protocol viewports.
+    ///
+    /// Unlike the half-block/braille paths, the viewport is not represented in
+    /// this cell buffer, so every frame must begin as an empty text layer. That
+    /// lets [`flush`] emit spaces for overlay cells that disappeared (welcome
+    /// card, command palette, chat panel, menus) instead of leaving stale text
+    /// stacked over the Kitty/Ghostty image.
+    pub fn begin_overlay_frame(&mut self) {
+        for cell in &mut self.cells {
+            cell.ch = ' ';
+            cell.fg = Color::Default;
+            cell.bg = Color::Default;
+            cell.underline = false;
         }
     }
 
@@ -233,6 +250,17 @@ impl CellBuffer {
         self.cells.clone_from(&self.prev);
 
         Ok(())
+    }
+
+    /// Force the next flush to repaint every cell that the current frame writes.
+    ///
+    /// Pixel protocols (Kitty/iTerm2/Sixel) draw the viewport outside this text
+    /// buffer. When the viewport image is refreshed it physically covers any
+    /// previously flushed overlay text, but `prev` still believes those cells are
+    /// already on screen. Invalidating `prev` makes the overlay pass repaint on
+    /// top of the fresh image.
+    pub fn invalidate_all(&mut self) {
+        self.prev = vec![Cell::default(); self.width as usize * self.height as usize];
     }
 
     /// Handle terminal resize.
