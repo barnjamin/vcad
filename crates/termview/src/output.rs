@@ -16,6 +16,9 @@ pub struct GraphicsOutput {
     image_id: u32,
     /// Whether running inside tmux (for passthrough wrapping).
     in_tmux: bool,
+    /// Last Kitty image dimensions. Used to delete only on resize instead of
+    /// every frame, which avoids visible flashing during camera motion.
+    last_kitty_size: Option<(u32, u32)>,
 }
 
 impl Default for GraphicsOutput {
@@ -33,6 +36,7 @@ impl GraphicsOutput {
             caps,
             image_id: 1,
             in_tmux,
+            last_kitty_size: None,
         }
     }
 
@@ -43,6 +47,7 @@ impl GraphicsOutput {
             caps,
             image_id: 1,
             in_tmux,
+            last_kitty_size: None,
         }
     }
 
@@ -60,12 +65,15 @@ impl GraphicsOutput {
     pub fn display(&mut self, buffer: &RenderBuffer, stdout: &mut impl Write) -> io::Result<()> {
         match self.caps.protocol {
             GraphicsProtocol::Kitty => {
+                // Keep a stable id for the full-screen viewport. Incrementing
+                // creates a new Kitty/Ghostty placement every frame, which can
+                // leave a stack of old images behind the UI during startup or
+                // camera changes.
                 let img = kitty::render_buffer_to_kitty(buffer, self.image_id);
-                self.image_id = self.image_id.wrapping_add(1);
-                if self.image_id == 0 {
-                    self.image_id = 1;
-                }
-                img.display(stdout, self.in_tmux)
+                let size = (buffer.width, buffer.height);
+                let delete_first = self.last_kitty_size.is_some_and(|last| last != size);
+                self.last_kitty_size = Some(size);
+                img.display_with_options(stdout, self.in_tmux, delete_first)
             }
             GraphicsProtocol::ITerm2 => self.display_iterm2(buffer, stdout),
             GraphicsProtocol::Sixel => {

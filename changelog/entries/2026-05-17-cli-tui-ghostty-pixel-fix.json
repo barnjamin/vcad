@@ -1,0 +1,9 @@
+{
+  "id": "2026-05-17-cli-tui-ghostty-pixel-fix",
+  "version": "0.9.4",
+  "date": "2026-05-17",
+  "category": "fix",
+  "title": "Fix CLI TUI display in Ghostty",
+  "summary": "The CLI TUI now sizes pixel viewports from terminal-reported dimensions and repaints overlays after image refreshes.",
+  "features": ["cli", "tui", "terminal"]
+}

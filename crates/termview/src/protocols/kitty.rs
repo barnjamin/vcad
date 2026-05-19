@@ -6,6 +6,7 @@
 //! See: <https://sw.kovidgoyal.net/kitty/graphics-protocol/>
 
 use base64::{engine::general_purpose::STANDARD, Engine};
+use flate2::{write::ZlibEncoder, Compression};
 use std::io::{self, Write};
 
 use crate::RenderBuffer;
@@ -39,24 +40,55 @@ impl KittyImage {
     /// When `in_tmux` is true, wraps each escape sequence in DCS passthrough
     /// (requires `set -g allow-passthrough on` in tmux.conf).
     pub fn display(&self, stdout: &mut impl Write, in_tmux: bool) -> io::Result<()> {
+        self.display_with_options(stdout, in_tmux, false)
+    }
+
+    /// Encode and display image, optionally deleting the prior placement first.
+    ///
+    /// Avoiding an unconditional delete makes camera motion much less flashy:
+    /// Kitty replaces an image sent with the same id, while delete+reupload leaves
+    /// a visible blank interval on slower terminals. Callers should request a
+    /// delete only when dimensions/placement changed and stale pixels are possible.
+    pub fn display_with_options(
+        &self,
+        stdout: &mut impl Write,
+        in_tmux: bool,
+        delete_first: bool,
+    ) -> io::Result<()> {
         // Kitty protocol: ESC_G<payload>ESC\
-        // a=T (transmit), f=32 (RGBA), s=width, v=height, i=id
+        // a=T (transmit and display), f=32 (RGBA), s=width, v=height, i=id.
+        // z=-1 places the viewport below terminal text. Ghostty composites
+        // image rendering asynchronously, so the image can otherwise appear on
+        // top of subsequently-written menus/chat even though we flush text
+        // after the image sequence.
 
-        let b64 = STANDARD.encode(&self.data);
+        if delete_first {
+            let delete_seq = format!("\x1b_Ga=d,d=i,i={},q=2\x1b\\", self.id);
+            if in_tmux {
+                write!(stdout, "{}", tmux_wrap(&delete_seq))?;
+            } else {
+                write!(stdout, "{}", delete_seq)?;
+            }
+        }
+
+        let (payload, compressed) = kitty_payload(&self.data)?;
+        let b64 = STANDARD.encode(payload);
         let chunk_size = 4096;
+        let chunk_count = b64.len().div_ceil(chunk_size);
 
-        let chunks: Vec<&[u8]> = b64.as_bytes().chunks(chunk_size).collect();
-
-        for (i, chunk) in chunks.iter().enumerate() {
-            let more = if i < chunks.len() - 1 { "m=1" } else { "m=0" };
+        for (i, chunk) in b64.as_bytes().chunks(chunk_size).enumerate() {
+            let more = if i + 1 < chunk_count { "m=1" } else { "m=0" };
             let chunk_str = std::str::from_utf8(chunk)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
             let seq = if i == 0 {
-                // First chunk: include all parameters
+                // First chunk: include all parameters. `o=z` tells Kitty that
+                // the RGBA payload is zlib-compressed; this dramatically cuts
+                // terminal bandwidth for flat CAD previews.
+                let compression = if compressed { ",o=z" } else { "" };
                 format!(
-                    "\x1b_Ga=T,f=32,s={},v={},i={},{};{}\x1b\\",
-                    self.width, self.height, self.id, more, chunk_str
+                    "\x1b_Ga=T,f=32,s={},v={},i={},z=-1,q=2{},{};{}\x1b\\",
+                    self.width, self.height, self.id, compression, more, chunk_str
                 )
             } else {
                 // Continuation chunks
@@ -104,6 +136,25 @@ impl KittyImage {
     pub fn delete(&self, stdout: &mut impl Write) -> io::Result<()> {
         write!(stdout, "\x1b_Ga=d,d=i,i={}\x1b\\", self.id)?;
         stdout.flush()
+    }
+}
+
+/// Build the bytes sent as the Kitty payload.
+///
+/// Compression can be disabled with `TERMVIEW_KITTY_COMPRESS=0`. The encoder
+/// uses fast zlib and falls back to raw RGBA when compression does not help.
+fn kitty_payload(data: &[u8]) -> io::Result<(Vec<u8>, bool)> {
+    if std::env::var_os("TERMVIEW_KITTY_COMPRESS").is_some_and(|v| v == "0") {
+        return Ok((data.to_vec(), false));
+    }
+
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
+    encoder.write_all(data)?;
+    let compressed = encoder.finish()?;
+    if compressed.len() < data.len() {
+        Ok((compressed, true))
+    } else {
+        Ok((data.to_vec(), false))
     }
 }
 

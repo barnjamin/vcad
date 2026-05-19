@@ -1552,6 +1552,7 @@ fn run_loop(
     let mut cell_buffer = CellBuffer::new(term_w, term_h);
     let mut render_buffer = RenderBuffer::new(80, 40);
     let mut last_camera = app.camera.snapshot();
+    let mut last_overlay_mask = overlay_mask(app);
     let mut gfx = GraphicsOutput::new();
     let protocol = gfx.protocol();
     let proto_name = match protocol {
@@ -1573,13 +1574,23 @@ fn run_loop(
             app.render_dirty = true;
         }
 
-        // Size render buffer based on protocol
+        // Size render buffer based on protocol. For pixel protocols prefer the
+        // terminal's reported pixel size; guessed cell dimensions are visibly
+        // wrong on Ghostty and other terminals with non-default fonts/scaling.
         let (viewport_width, viewport_height) = match protocol {
             GraphicsProtocol::Kitty | GraphicsProtocol::ITerm2 | GraphicsProtocol::Sixel => {
-                let caps = gfx.caps();
-                let w = area.width as u32 * caps.cell_width;
-                let h = area.height as u32 * caps.cell_height;
-                (w, h)
+                match terminal::window_size() {
+                    Ok(size) if size.width > 0 && size.height > 0 => {
+                        (size.width as u32, size.height as u32)
+                    }
+                    _ => {
+                        let caps = gfx.caps();
+                        (
+                            area.width as u32 * caps.cell_width,
+                            area.height as u32 * caps.cell_height,
+                        )
+                    }
+                }
             }
             GraphicsProtocol::HalfBlock => (area.width as u32, (area.height as u32) * 2),
             GraphicsProtocol::Braille => ((area.width as u32) * 2, (area.height as u32) * 4),
@@ -1590,7 +1601,14 @@ fn run_loop(
             app.render_dirty = true;
         }
 
-        // Only re-render 3D scene when something changed
+        // Only re-render 3D scene when something changed. In pixel-protocol
+        // mode the viewport image sits behind text overlays, so redraw it when
+        // a large overlay closes; otherwise stale text remains burned into the
+        // terminal until the next camera/document change.
+        let current_overlay_mask = overlay_mask(app);
+        if is_pixel_protocol(protocol) && current_overlay_mask != last_overlay_mask {
+            app.render_dirty = true;
+        }
         let current_camera = app.camera.snapshot();
         let viewport_dirty = app.render_dirty || current_camera != last_camera;
         if viewport_dirty {
@@ -1610,11 +1628,19 @@ fn run_loop(
         match protocol {
             GraphicsProtocol::Kitty | GraphicsProtocol::ITerm2 | GraphicsProtocol::Sixel => {
                 if viewport_dirty {
-                    // Move cursor to top-left and output pixel-perfect image
+                    // Move cursor to top-left and output pixel-perfect image.
+                    // The image overwrites already-flushed overlay cells on
+                    // screen, so invalidate the text diff buffer and force the
+                    // chrome to repaint on top in this same frame.
                     execute!(stdout, crossterm::cursor::MoveTo(0, 0))?;
                     gfx.display(&render_buffer, stdout)?;
+                    cell_buffer.invalidate_all();
                 }
-                // Overlay UI via CellBuffer on top
+                // Overlay UI via CellBuffer on top. Because Kitty/Ghostty
+                // images live outside the text buffer, explicitly begin from
+                // an empty text layer so closed overlays are erased instead of
+                // accumulating as stale terminal text.
+                cell_buffer.begin_overlay_frame();
                 ui::draw_overlays(&mut cell_buffer, app);
             }
             GraphicsProtocol::HalfBlock => {
@@ -1627,6 +1653,7 @@ fn run_loop(
 
         // Flush only changed cells
         cell_buffer.flush(stdout)?;
+        last_overlay_mask = current_overlay_mask;
 
         // Drain captured stderr/panic lines into the log ring buffer so
         // the status bar surfaces them instead of a corrupt display.
@@ -1663,6 +1690,24 @@ fn run_loop(
     }
 
     Ok(())
+}
+
+fn is_pixel_protocol(protocol: GraphicsProtocol) -> bool {
+    matches!(
+        protocol,
+        GraphicsProtocol::Kitty | GraphicsProtocol::ITerm2 | GraphicsProtocol::Sixel
+    )
+}
+
+fn overlay_mask(app: &App) -> (bool, bool, bool, bool, bool, bool) {
+    (
+        app.show_welcome,
+        app.chat.open,
+        app.command_mode(),
+        app.sidebar_visible,
+        app.menu_state.is_open(),
+        app.is_orbiting,
+    )
 }
 
 /// Render the scene using CPU ray tracing and copy into the RenderBuffer.
