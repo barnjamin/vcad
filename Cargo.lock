@@ -3911,7 +3911,7 @@ dependencies = [
 
 [[package]]
 name = "phyz"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "tang",
 ]
@@ -6084,6 +6084,7 @@ name = "termview"
 version = "0.9.4"
 dependencies = [
  "base64 0.22.1",
+ "flate2",
  "image",
 ]
 

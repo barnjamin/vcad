@@ -86,7 +86,8 @@ pub fn hit_test(app: &App, area: Rect, col: u16, row: u16) -> HitRegion {
     }
 
     // Bottom toolbar
-    let toolbar_rect = crate::ui::toolbar::toolbar_rect(area, app.active_tab);
+    let toolbar_rect =
+        crate::ui::toolbar::toolbar_rect_for(area, app.active_tab, app.tool_input.is_some());
     if row >= toolbar_rect.y
         && row < toolbar_rect.y + toolbar_rect.height
         && col >= toolbar_rect.x
@@ -127,15 +128,20 @@ pub fn hit_test(app: &App, area: Rect, col: u16, row: u16) -> HitRegion {
     // Sidebar
     if app.sidebar_visible {
         let parts = app.get_parts();
-        let sb_rect = crate::ui::tree::sidebar_rect(area, parts.len());
+        let sidebar_top = toolbar_rect.y + toolbar_rect.height + 1;
+        let sb_rect = crate::ui::tree::sidebar_rect(area, parts.len(), sidebar_top);
         if row >= sb_rect.y
             && row < sb_rect.y + sb_rect.height
             && col >= sb_rect.x
             && col < sb_rect.x + sb_rect.width
         {
-            if let Some(idx) =
-                crate::ui::tree::part_at_row(area, parts.len(), app.sidebar_scroll, row)
-            {
+            if let Some(idx) = crate::ui::tree::part_at_row(
+                area,
+                parts.len(),
+                app.sidebar_scroll,
+                row,
+                sidebar_top,
+            ) {
                 return HitRegion::Sidebar(idx);
             }
         }
@@ -319,6 +325,13 @@ fn handle_sub_tool_click(app: &mut App, tool_idx: usize) -> anyhow::Result<bool>
                 "export {}".to_string(),
             ));
         }
+        "render" => {
+            app.tool_input = Some(ToolInput::text(
+                "Render PNG",
+                "vcad-render.png",
+                "render {}".to_string(),
+            ));
+        }
 
         // Assembly / Simulate stubs
         "__assembly_stub" => {
@@ -390,6 +403,7 @@ pub fn handle_mouse(
                 HitRegion::Sidebar(part_idx) => {
                     let parts = app.get_parts();
                     if part_idx < parts.len() {
+                        let selection_before = app.selected.clone();
                         let id = parts[part_idx].0;
                         if event.modifiers.contains(KeyModifiers::SHIFT) {
                             if app.selected.contains(&id) {
@@ -400,6 +414,9 @@ pub fn handle_mouse(
                         } else {
                             app.selected.clear();
                             app.selected.insert(id);
+                        }
+                        if app.selected != selection_before {
+                            app.render_dirty = true;
                         }
                         app.focused_part_index = part_idx;
                         app.auto_switch_tab();
@@ -431,6 +448,7 @@ pub fn handle_mouse(
                         app.set_status("Camera reset");
                     } else {
                         // Click-to-select via pick buffer
+                        let selection_before = app.selected.clone();
                         let pick_id = if let Some((cw, ch)) = cell_dims {
                             render_buffer.pick_at_for_protocol(col, row, cw, ch)
                         } else {
@@ -451,6 +469,9 @@ pub fn handle_mouse(
                             app.set_status(format!("{} selected", app.selected.len()));
                         } else {
                             app.selected.clear();
+                        }
+                        if app.selected != selection_before {
+                            app.render_dirty = true;
                         }
                         app.auto_switch_tab();
                     }
@@ -669,27 +690,65 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
             }
             KeyCode::Enter => {
                 if let Some(msg) = app.chat.send_message() {
-                    crate::chat_session::push_user_message(app, msg);
-                    if let Err(e) = crate::chat_session::start_chat_turn(app) {
-                        app.log(crate::app::LogLevel::Error, "chat", e.to_string());
+                    if let Some(cmd) = msg
+                        .strip_prefix('/')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                    {
+                        let had_tool_input = app.tool_input.is_some();
+                        if let Err(e) = app.process_command(cmd) {
+                            app.log(crate::app::LogLevel::Error, "command", e.to_string());
+                            app.chat.debug(format!("✗ /{cmd}: {e}"));
+                        } else {
+                            let opened_tool_input = !had_tool_input && app.tool_input.is_some();
+                            app.chat.debug(format!("✓ /{cmd}"));
+                            app.auto_switch_tab();
+                            if opened_tool_input {
+                                // Slash commands like /render can open inline toolbar input.
+                                // Give that input keyboard focus instead of trapping typing in chat.
+                                app.chat.open = false;
+                                app.chat.focused = false;
+                            }
+                        }
+                    } else {
+                        crate::chat_session::push_user_message(app, msg);
+                        if let Err(e) = crate::chat_session::start_chat_turn(app) {
+                            app.log(crate::app::LogLevel::Error, "chat", e.to_string());
+                        }
                     }
                 }
             }
             KeyCode::Backspace => {
                 app.chat.input.pop();
+                app.chat.slash_selected_index = 0;
             }
             KeyCode::Up => {
                 if key.modifiers.contains(KeyModifiers::SHIFT) {
                     app.chat.scroll = app.chat.scroll.saturating_add(1);
                 } else {
-                    app.chat.history_up();
+                    let suggestions = crate::ui::chat::slash_command_suggestions(&app.chat.input);
+                    if !suggestions.is_empty() {
+                        app.chat.slash_selected_index = app
+                            .chat
+                            .slash_selected_index
+                            .saturating_sub(1)
+                            .min(suggestions.len().saturating_sub(1));
+                    } else {
+                        app.chat.history_up();
+                    }
                 }
             }
             KeyCode::Down => {
                 if key.modifiers.contains(KeyModifiers::SHIFT) {
                     app.chat.scroll = app.chat.scroll.saturating_sub(1);
                 } else {
-                    app.chat.history_down();
+                    let suggestions = crate::ui::chat::slash_command_suggestions(&app.chat.input);
+                    if !suggestions.is_empty() {
+                        app.chat.slash_selected_index = (app.chat.slash_selected_index + 1)
+                            .min(suggestions.len().saturating_sub(1));
+                    } else {
+                        app.chat.history_down();
+                    }
                 }
             }
             KeyCode::PageUp => {
@@ -698,8 +757,18 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
             KeyCode::PageDown => {
                 app.chat.scroll = app.chat.scroll.saturating_sub(5);
             }
+            KeyCode::Tab => {
+                if let Some(name) = crate::ui::chat::slash_command_completion_at(
+                    &app.chat.input,
+                    app.chat.slash_selected_index,
+                ) {
+                    app.chat.input = format!("/{name} ");
+                    app.chat.slash_selected_index = 0;
+                }
+            }
             KeyCode::Char(c) => {
                 app.chat.input.push(c);
+                app.chat.slash_selected_index = 0;
             }
             _ => {}
         }
@@ -732,7 +801,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
                         app.set_status("Tutorial: now add a cylinder (open Create tab)");
                     }
                     crate::ui::welcome::WelcomeAction::BlankProject => {
-                        app.set_status("Ready — press : for commands, Tab for tools");
+                        app.set_status("Ready — press ` for chat (/cmd), Tab for tools");
                     }
                     crate::ui::welcome::WelcomeAction::OpenFile => {
                         // Enter command mode with "open" pre-filled
@@ -741,13 +810,13 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
                         app.command_selected_index = 0;
                     }
                     crate::ui::welcome::WelcomeAction::Dismiss => {
-                        app.set_status("Ready — press : for commands, Tab for tools");
+                        app.set_status("Ready — press ` for chat (/cmd), Tab for tools");
                     }
                 }
             }
             KeyCode::Esc | KeyCode::Char('q') => {
                 app.show_welcome = false;
-                app.set_status("Ready — press : for commands, Tab for tools");
+                app.set_status("Ready — press ` for chat (/cmd), Tab for tools");
             }
             _ => {}
         }
@@ -907,8 +976,17 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
                 KeyCode::Char('q') => {
                     return Ok(false); // signal quit
                 }
-                KeyCode::Char(':') | KeyCode::Char('/') => {
+                KeyCode::Char(':') => {
                     app.mode = TuiMode::Command;
+                }
+                KeyCode::Char('/') => {
+                    // Open/focus chat and seed the slash-command prefix,
+                    // mirroring ':' opening the command palette.
+                    app.chat.open = true;
+                    app.chat.focused = true;
+                    if app.chat.input.is_empty() {
+                        app.chat.input.push('/');
+                    }
                 }
                 KeyCode::Char('`') => {
                     // Open and focus the chat sidebar.
@@ -983,20 +1061,45 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
                 KeyCode::Char('+') | KeyCode::Char('=') => app.camera.zoom(0.8),
                 KeyCode::Char('-') => app.camera.zoom(1.25),
                 // Part selection
-                KeyCode::Tab => {
+                KeyCode::Char('j') => {
                     let parts = app.get_parts();
                     if !parts.is_empty() {
                         app.focused_part_index = (app.focused_part_index + 1) % parts.len();
+                        app.set_status(format!("Focused {}", parts[app.focused_part_index].1));
+                    }
+                }
+                KeyCode::Char('k') => {
+                    let parts = app.get_parts();
+                    if !parts.is_empty() {
+                        app.focused_part_index = if app.focused_part_index == 0 {
+                            parts.len() - 1
+                        } else {
+                            app.focused_part_index - 1
+                        };
+                        app.set_status(format!("Focused {}", parts[app.focused_part_index].1));
+                    }
+                }
+                KeyCode::Tab => {
+                    let parts = app.get_parts();
+                    if !parts.is_empty() {
+                        let selection_before = app.selected.clone();
+                        app.focused_part_index = (app.focused_part_index + 1) % parts.len();
                         app.selected.clear();
                         app.selected.insert(parts[app.focused_part_index].0);
+                        if app.selected != selection_before {
+                            app.render_dirty = true;
+                        }
                         app.auto_switch_tab();
                     }
                 }
                 KeyCode::Esc => {
-                    app.selected.clear();
+                    if !app.selected.is_empty() {
+                        app.selected.clear();
+                        app.render_dirty = true;
+                    }
                     app.auto_switch_tab();
                 }
-                KeyCode::Enter => {
+                KeyCode::Enter | KeyCode::Char(' ') => {
                     let parts = app.get_parts();
                     if app.focused_part_index < parts.len() {
                         let id = parts[app.focused_part_index].0;
@@ -1005,16 +1108,20 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
                         } else {
                             app.selected.insert(id);
                         }
+                        app.render_dirty = true;
+                        app.set_status(format!("{} selected", app.selected.len()));
                         app.auto_switch_tab();
                     }
                 }
-                // WASD translation
-                KeyCode::Char('w') => app.translate_selected(0.0, 0.0, 5.0)?,
+                // WASD translation on the X/Z plane. PageUp/PageDown move on Y.
+                KeyCode::Char('w') => app.translate_selected(0.0, 0.0, -5.0)?,
                 KeyCode::Char('s') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    app.translate_selected(0.0, 0.0, -5.0)?
+                    app.translate_selected(0.0, 0.0, 5.0)?
                 }
                 KeyCode::Char('a') => app.translate_selected(-5.0, 0.0, 0.0)?,
                 KeyCode::Char('d') => app.translate_selected(5.0, 0.0, 0.0)?,
+                KeyCode::PageUp => app.translate_selected(0.0, 5.0, 0.0)?,
+                KeyCode::PageDown => app.translate_selected(0.0, -5.0, 0.0)?,
                 KeyCode::Char('t') => {
                     let mode_name = crate::ui::theme::toggle();
                     app.render_dirty = true;

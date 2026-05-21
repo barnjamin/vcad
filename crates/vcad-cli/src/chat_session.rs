@@ -552,6 +552,14 @@ pub fn load_history() -> Vec<ChatMessage> {
         .collect()
 }
 
+/// Delete persisted chat history. Best-effort: missing/unavailable history is OK.
+pub fn clear_history() {
+    let Some(path) = history_path() else {
+        return;
+    };
+    let _ = fs::remove_file(path);
+}
+
 /// Render a loaded message into the chat panel's display lines so the
 /// history is visible on launch. Messages with content-block arrays
 /// (tool_use / tool_result) are expanded into debug lines so the user

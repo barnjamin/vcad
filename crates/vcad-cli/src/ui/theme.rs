@@ -150,7 +150,13 @@ pub fn init() {
     let probed = None::<(u8, u8, u8)>;
     let runtime = match probed {
         Some((r, g, b)) => terminal_from_bg(r, g, b),
-        None => TERMINAL,
+        // Pixel-protocol viewports (Kitty/Ghostty) sit behind the terminal
+        // text layer. If we leave Terminal-theme backgrounds as `Default`,
+        // panels are effectively transparent and the viewport shows through
+        // chat/menu/welcome overlays. Use a concrete dark fallback when OSC 11
+        // probing is unavailable; terminals that answer the probe still get a
+        // shade derived from the user's real background above.
+        None => terminal_from_bg(0x1b, 0x1b, 0x1d),
     };
     let _ = TERMINAL_RUNTIME.set(runtime);
 }

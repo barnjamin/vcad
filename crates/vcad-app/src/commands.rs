@@ -479,6 +479,17 @@ static COMMANDS: &[Command] = &[
         ..CMD_DEFAULTS
     },
     Command {
+        id: "render",
+        label_key: "cmd.render.label",
+        keywords: &["png", "image", "screenshot", "view"],
+        icon: "\u{1F5BC}",
+        tab: ToolbarTab::Export,
+        category: Some(CommandCategory::File),
+        when: Some("has_parts"),
+        target: Target::Host,
+        ..CMD_DEFAULTS
+    },
+    Command {
         id: "quit",
         label_key: "cmd.quit.label",
         keywords: &["exit", "close", "q"],

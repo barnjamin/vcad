@@ -31,9 +31,55 @@ const FALLBACK_SYSTEM_PROMPT =
   "You are vcad's AI assistant — a parametric CAD copilot. Coordinate system: Z-up (X right, Y forward, Z up). Units: millimeters. Be concise.";
 
 const ANON_DAILY_TOKEN_LIMIT = TIERS.anon.anonDailyTokenLimit ?? 10_000;
-const ANTHROPIC_MODEL = "claude-opus-4-7";
-const ANTHROPIC_SAFETY_MODEL = "claude-haiku-4-5";
+const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || "claude-opus-4-7";
+const ANTHROPIC_SAFETY_MODEL = process.env.ANTHROPIC_SAFETY_MODEL || "claude-haiku-4-5";
 const ANTHROPIC_MAX_TOKENS = 8192;
+const OPENAI_COMPAT_MAX_TOKENS = 8192;
+
+type ChatBackend =
+  | { kind: "anthropic"; apiKey: string; model: string }
+  | { kind: "openai-compatible"; apiKey: string | null; baseUrl: string; model: string; provider: string };
+
+function getChatBackend(): ChatBackend | null {
+  const defaultProvider = process.env.OPENROUTER_API_KEY || process.env.OPENROUTER_KEY
+    ? "openrouter"
+    : "anthropic";
+  const provider = (process.env.VCAD_CHAT_PROVIDER || process.env.CHAT_PROVIDER || defaultProvider).toLowerCase();
+  if (provider === "openrouter") {
+    const apiKey = process.env.OPENROUTER_API_KEY || process.env.OPENROUTER_KEY || process.env.OPENAI_API_KEY || null;
+    if (!apiKey) return null;
+    return {
+      kind: "openai-compatible",
+      provider,
+      apiKey,
+      baseUrl: process.env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1",
+      model: process.env.OPENROUTER_MODEL || process.env.OPENAI_MODEL || "anthropic/claude-3.5-sonnet",
+    };
+  }
+  if (provider === "ollama" || provider === "llama") {
+    return {
+      kind: "openai-compatible",
+      provider: "ollama",
+      apiKey: process.env.OLLAMA_API_KEY || null,
+      baseUrl: process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434/v1",
+      model: process.env.OLLAMA_MODEL || process.env.OPENAI_MODEL || "llama3.2",
+    };
+  }
+  if (provider === "openai" || provider === "openai-compatible") {
+    const apiKey = process.env.OPENAI_API_KEY || null;
+    if (!apiKey) return null;
+    return {
+      kind: "openai-compatible",
+      provider,
+      apiKey,
+      baseUrl: process.env.OPENAI_BASE_URL || "https://api.openai.com/v1",
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+    };
+  }
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return null;
+  return { kind: "anthropic", apiKey, model: ANTHROPIC_MODEL };
+}
 
 const SAFETY_SYSTEM_PROMPT = `You are a safety classifier for vcad, a CAD design assistant. Users have multi-turn conversations where prompts often reference earlier turns ("now subtract them", "add a fillet to that one", "make it bigger", "do the same to the other part").
 
@@ -343,6 +389,204 @@ async function pipeAnthropicStream(
 }
 
 // ---------------------------------------------------------------------------
+// OpenAI-compatible streaming (OpenRouter, Ollama, OpenAI-compatible servers)
+// ---------------------------------------------------------------------------
+
+type OpenAIMessage =
+  | { role: "system" | "user" | "assistant"; content: string | null; tool_calls?: OpenAIToolCall[] }
+  | { role: "tool"; tool_call_id: string; content: string };
+
+type OpenAIToolCall = {
+  id: string;
+  type: "function";
+  function: { name: string; arguments: string };
+};
+
+function anthropicToolsToOpenAI(tools: AnthropicTool[]) {
+  return tools.map((t) => ({
+    type: "function" as const,
+    function: {
+      name: t.name,
+      description: t.description,
+      parameters: t.input_schema,
+    },
+  }));
+}
+
+function stringifyToolResult(content: unknown): string {
+  if (typeof content === "string") return content;
+  return JSON.stringify(content ?? "");
+}
+
+function messagesToOpenAI(messages: ChatRequestBody["messages"]): OpenAIMessage[] {
+  const out: OpenAIMessage[] = [];
+  for (const msg of messages) {
+    if (typeof msg.content === "string") {
+      out.push({ role: msg.role, content: msg.content });
+      continue;
+    }
+
+    if (msg.role === "assistant") {
+      const text: string[] = [];
+      const toolCalls: OpenAIToolCall[] = [];
+      for (const block of msg.content) {
+        const b = block as { type?: string; text?: string; id?: string; name?: string; input?: unknown };
+        if (b.type === "text" && b.text) text.push(b.text);
+        if (b.type === "tool_use" && b.id && b.name) {
+          toolCalls.push({
+            id: b.id,
+            type: "function",
+            function: { name: b.name, arguments: JSON.stringify(b.input ?? {}) },
+          });
+        }
+      }
+      out.push({
+        role: "assistant",
+        content: text.join("\n") || null,
+        ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
+      });
+      continue;
+    }
+
+    // Anthropic represents tool results as a user message containing
+    // `tool_result` blocks. OpenAI-compatible APIs require separate
+    // role=tool messages.
+    let sawToolResult = false;
+    const userText: string[] = [];
+    for (const block of msg.content) {
+      const b = block as { type?: string; text?: string; tool_use_id?: string; content?: unknown };
+      if (b.type === "tool_result" && b.tool_use_id) {
+        sawToolResult = true;
+        out.push({ role: "tool", tool_call_id: b.tool_use_id, content: stringifyToolResult(b.content) });
+      } else if (b.type === "text" && b.text) {
+        userText.push(b.text);
+      }
+    }
+    if (!sawToolResult || userText.length) out.push({ role: "user", content: userText.join("\n") });
+  }
+  return out;
+}
+
+async function pipeOpenAICompatibleStream(
+  body: ReadableStream<Uint8Array>,
+  write: (chunk: string) => void,
+  persistence?: PersistenceHooks,
+): Promise<{
+  inputTokens: number;
+  outputTokens: number;
+  toolCallCount: number;
+  contentBlocks: AssembledContentBlock[];
+}> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let toolCallCount = 0;
+  const contentBlocks: AssembledContentBlock[] = [];
+  let currentTextIdx: number | null = null;
+  const toolIndexes = new Map<number, number>();
+  const toolJson = new Map<number, string>();
+  const startedTools = new Set<number>();
+
+  function ensureTool(index: number, id?: string, name?: string): void {
+    if (toolIndexes.has(index)) {
+      const block = contentBlocks[toolIndexes.get(index)!]!;
+      if (id) block.id = id;
+      if (name) block.name = name;
+      return;
+    }
+    const block: AssembledContentBlock = {
+      type: "tool_use",
+      id: id || `tool_${index}_${Date.now()}`,
+      name: name || "unknown",
+      input: {},
+    };
+    contentBlocks.push(block);
+    toolIndexes.set(index, contentBlocks.length - 1);
+    toolJson.set(index, "");
+  }
+
+  function maybeStartTool(index: number): void {
+    const block = contentBlocks[toolIndexes.get(index)!]!;
+    if (startedTools.has(index) || !block.id || !block.name || block.name === "unknown") return;
+    startedTools.add(index);
+    toolCallCount++;
+    write(`data: ${JSON.stringify({ type: "tool_start", id: block.id, name: block.name })}\n\n`);
+    persistence?.onContentBlock({ type: "tool_use", id: block.id, name: block.name });
+    persistence?.onDelta("tool_start", { id: block.id, name: block.name });
+  }
+
+  function finishTools(): void {
+    for (const [index, idx] of toolIndexes) {
+      const block = contentBlocks[idx]!;
+      try {
+        block.input = JSON.parse(toolJson.get(index) || "{}");
+      } catch {
+        block.input = {};
+      }
+      if (block.id) {
+        persistence?.onContentBlock({ type: "__tool_args_finalized__", id: block.id, input: block.input });
+      }
+      write(`data: ${JSON.stringify({ type: "block_stop" })}\n\n`);
+      persistence?.onDelta("block_stop", null);
+    }
+    toolIndexes.clear();
+    toolJson.clear();
+    startedTools.clear();
+  }
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line.startsWith("data: ")) continue;
+      const data = line.slice(6);
+      if (data === "[DONE]") {
+        finishTools();
+        write(`data: ${JSON.stringify({ type: "done" })}\n\n`);
+        persistence?.onDelta("done", null);
+        continue;
+      }
+      let event: any;
+      try { event = JSON.parse(data); } catch { continue; }
+      if (event.usage) {
+        inputTokens = Number(event.usage.prompt_tokens ?? event.usage.input_tokens ?? inputTokens);
+        outputTokens = Number(event.usage.completion_tokens ?? event.usage.output_tokens ?? outputTokens);
+      }
+      const delta = event.choices?.[0]?.delta;
+      if (!delta) continue;
+      if (typeof delta.content === "string" && delta.content.length > 0) {
+        if (currentTextIdx === null) {
+          contentBlocks.push({ type: "text", text: "" });
+          currentTextIdx = contentBlocks.length - 1;
+        }
+        contentBlocks[currentTextIdx]!.text = (contentBlocks[currentTextIdx]!.text ?? "") + delta.content;
+        write(`data: ${JSON.stringify({ type: "text", text: delta.content })}\n\n`);
+        persistence?.onDelta("text", { text: delta.content });
+      }
+      for (const tc of delta.tool_calls ?? []) {
+        const index = Number(tc.index ?? 0);
+        ensureTool(index, tc.id, tc.function?.name);
+        maybeStartTool(index);
+        const args = tc.function?.arguments;
+        if (typeof args === "string" && args.length > 0) {
+          toolJson.set(index, (toolJson.get(index) ?? "") + args);
+          write(`data: ${JSON.stringify({ type: "tool_delta", json: args })}\n\n`);
+          persistence?.onDelta("tool_input_json", { json: args });
+        }
+      }
+    }
+  }
+
+  return { inputTokens, outputTokens, toolCallCount, contentBlocks };
+}
+
+// ---------------------------------------------------------------------------
 // Safety classifier + conversation storage
 // ---------------------------------------------------------------------------
 
@@ -609,11 +853,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return;
   }
 
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    res.status(503).json({ error: "Chat service not configured (missing ANTHROPIC_API_KEY)" });
+  const backend = getChatBackend();
+  if (!backend) {
+    res.status(503).json({
+      error:
+        "Chat service not configured. Set ANTHROPIC_API_KEY, or set VCAD_CHAT_PROVIDER=openrouter with OPENROUTER_API_KEY, or VCAD_CHAT_PROVIDER=ollama.",
+    });
     return;
   }
+  const apiKey = backend.kind === "anthropic" ? backend.apiKey : process.env.ANTHROPIC_API_KEY;
 
   const admin = getSupabaseAdmin();
   // `effectiveUserId` is null for non-permanent sessions (anon or no auth) —
@@ -688,7 +936,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const tools = clientTools || [];
   const startedAt = Date.now();
 
-  const safety = await classifyPromptSafety(apiKey, messages);
+  // The safety classifier is Anthropic-specific. Keep it when an Anthropic
+  // key is configured; local/OpenRouter installs without one can still run.
+  const safety = apiKey
+    ? await classifyPromptSafety(apiKey, messages)
+    : ({ verdict: "safe", reason: "classifier disabled for non-Anthropic backend" } as SafetyVerdict);
 
   if (safety.verdict === "flagged") {
     if (admin) {
@@ -746,31 +998,48 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   } | null = null;
 
   try {
-    const anthropicRes = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-        "anthropic-beta": "prompt-caching-2024-07-31",
-      },
-      body: JSON.stringify({
-        model: ANTHROPIC_MODEL,
-        max_tokens: ANTHROPIC_MAX_TOKENS,
-        system: systemBlocks,
-        stream: true,
-        tools: cachedTools,
-        messages,
-      }),
-    });
+    const chatRes = backend.kind === "anthropic"
+      ? await fetch("https://api.anthropic.com/v1/messages", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-api-key": backend.apiKey,
+            "anthropic-version": "2023-06-01",
+            "anthropic-beta": "prompt-caching-2024-07-31",
+          },
+          body: JSON.stringify({
+            model: backend.model,
+            max_tokens: ANTHROPIC_MAX_TOKENS,
+            system: systemBlocks,
+            stream: true,
+            tools: cachedTools,
+            messages,
+          }),
+        })
+      : await fetch(`${backend.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(backend.apiKey ? { Authorization: `Bearer ${backend.apiKey}` } : {}),
+            ...(backend.provider === "openrouter" ? { "HTTP-Referer": "https://vcad.io", "X-Title": "vcad" } : {}),
+          },
+          body: JSON.stringify({
+            model: backend.model,
+            max_tokens: OPENAI_COMPAT_MAX_TOKENS,
+            stream: true,
+            stream_options: { include_usage: true },
+            messages: [{ role: "system", content: systemPrompt }, ...messagesToOpenAI(messages)],
+            tools: tools.length ? anthropicToolsToOpenAI(tools) : undefined,
+          }),
+        });
 
-    if (!anthropicRes.ok) {
-      const errText = await anthropicRes.text();
+    if (!chatRes.ok) {
+      const errText = await chatRes.text();
       console.error(
-        `[chat] anthropic ${anthropicRes.status}:`,
+        `[chat] ${backend.kind === "anthropic" ? "anthropic" : backend.provider} ${chatRes.status}:`,
         errText.slice(0, 500),
       );
-      res.statusCode = anthropicRes.status;
+      res.statusCode = chatRes.status;
       res.end(errText);
       if (admin) {
         const promptPreview = extractPromptPreview(messages);
@@ -791,7 +1060,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
     res.setHeader("Cache-Control", "no-cache");
 
-    if (!anthropicRes.body) {
+    if (!chatRes.body) {
       res.end();
       return;
     }
@@ -840,7 +1109,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           threadId: thread.id,
           messageId: assistantMessageId,
           parentMessageId: body.user_message_id,
-          modelId: ANTHROPIC_MODEL,
+          modelId: backend.model,
         });
         persistedTurn = { threadId: thread.id, assistantMessageId };
       }
@@ -899,18 +1168,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           }
         : undefined;
 
+    const streamed = backend.kind === "anthropic"
+      ? await pipeAnthropicStream(chatRes.body, (chunk) => res.write(chunk), persistence)
+      : await pipeOpenAICompatibleStream(chatRes.body, (chunk) => res.write(chunk), persistence);
     const {
       inputTokens,
       outputTokens,
       toolCallCount,
-      cacheReadTokens,
-      cacheCreationTokens,
       contentBlocks,
-    } = await pipeAnthropicStream(
-      anthropicRes.body,
-      (chunk) => res.write(chunk),
-      persistence,
-    );
+    } = streamed;
+    const cacheReadTokens = "cacheReadTokens" in streamed ? streamed.cacheReadTokens : 0;
+    const cacheCreationTokens = "cacheCreationTokens" in streamed ? streamed.cacheCreationTokens : 0;
 
     // Emit a usage event so the client can update its in-chat progress bar
     // without polling. For anon users we report the rolling 24h total

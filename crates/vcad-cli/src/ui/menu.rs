@@ -75,6 +75,11 @@ const FILE_ITEMS: &[MenuItem] = &[
         shortcut: "",
         command: "export_step",
     },
+    MenuItem::Action {
+        label_key: "menu.file.render",
+        shortcut: "",
+        command: "render",
+    },
     MenuItem::Separator,
     MenuItem::Action {
         label_key: "menu.file.quit",

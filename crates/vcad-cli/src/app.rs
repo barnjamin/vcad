@@ -839,7 +839,9 @@ impl App {
         }
         self.push_undo();
 
-        for &selected_id in &self.selected.clone() {
+        let selected_ids: Vec<_> = self.selected.iter().copied().collect();
+        let mut moved_mesh_indices = Vec::new();
+        for selected_id in selected_ids {
             if let Some(idx) = self
                 .document
                 .roots
@@ -847,8 +849,55 @@ impl App {
                 .position(|e| e.root == selected_id)
             {
                 let old_root = self.document.roots[idx].root;
-                let new_id = self.alloc_node_id();
 
+                // Keyboard nudging used to wrap the root in a fresh Translate
+                // node on every key repeat. That makes documents grow linearly
+                // while moving a part and forces increasingly expensive evals
+                // for something that is semantically just one accumulated
+                // offset. Coalesce the whole adjacent root Translate chain into
+                // one node; this also repairs files that already contain a long
+                // nudge history.
+                if let Some(Node {
+                    op:
+                        CsgOp::Translate {
+                            child: root_child,
+                            offset: root_offset,
+                        },
+                    ..
+                }) = self.document.nodes.get(&old_root)
+                {
+                    let mut accumulated =
+                        Vec3::new(root_offset.x + dx, root_offset.y + dy, root_offset.z + dz);
+                    let mut collapsed_child = *root_child;
+
+                    while let Some(Node {
+                        op:
+                            CsgOp::Translate {
+                                child: next_child,
+                                offset,
+                            },
+                        ..
+                    }) = self.document.nodes.get(&collapsed_child)
+                    {
+                        accumulated.x += offset.x;
+                        accumulated.y += offset.y;
+                        accumulated.z += offset.z;
+                        collapsed_child = *next_child;
+                    }
+
+                    if let Some(Node {
+                        op: CsgOp::Translate { child, offset },
+                        ..
+                    }) = self.document.nodes.get_mut(&old_root)
+                    {
+                        *child = collapsed_child;
+                        *offset = accumulated;
+                    }
+                    moved_mesh_indices.push(idx);
+                    continue;
+                }
+
+                let new_id = self.alloc_node_id();
                 self.document.nodes.insert(
                     new_id,
                     Node {
@@ -868,10 +917,33 @@ impl App {
                 self.document.roots[idx].root = new_id;
                 self.selected.remove(&selected_id);
                 self.selected.insert(new_id);
+                moved_mesh_indices.push(idx);
             }
         }
 
-        self.evaluate()?;
+        // Translation does not change topology or tessellation. Updating the
+        // cached mesh positions avoids a full BRep re-evaluation on every key
+        // repeat; wtf.vcad spends seconds rebuilding its patterned solid even
+        // though a keyboard nudge only changes the root transform.
+        if moved_mesh_indices.is_empty() {
+            return Ok(());
+        }
+        for idx in moved_mesh_indices {
+            if let Some(mesh) = self.meshes.get_mut(idx) {
+                for vertex in mesh.vertices.chunks_mut(3) {
+                    if let [x, y, z] = vertex {
+                        *x += dx as f32;
+                        *y += dy as f32;
+                        *z += dz as f32;
+                    }
+                }
+            } else {
+                self.evaluate()?;
+                self.set_status(format!("Translated by ({}, {}, {})", dx, dy, dz));
+                return Ok(());
+            }
+        }
+        self.render_dirty = true;
         self.set_status(format!("Translated by ({}, {}, {})", dx, dy, dz));
         Ok(())
     }
@@ -915,6 +987,34 @@ impl App {
         Ok(())
     }
 
+    /// Render the current viewport to a PNG file.
+    pub fn render_png(&mut self, path: &std::path::Path, width: u32, height: u32) -> Result<bool> {
+        let triangles = self.get_triangles();
+        if triangles.is_empty() {
+            self.set_status("No geometry to render");
+            return Ok(false);
+        }
+
+        let mut buffer = RenderBuffer::new(width.max(1), height.max(1));
+        let bg = crate::ui::theme::BG_RGB();
+        buffer.clear(bg.0, bg.1, bg.2);
+        crate::render::render_scene(&mut buffer, &triangles, &self.camera);
+
+        let gfx = GraphicsOutput::new();
+        gfx.save_png(&buffer, path)?;
+        self.set_status(format!("Rendered to {}", path.display()));
+        Ok(true)
+    }
+
+    /// Best-effort open of a rendered file in the OS default viewer/browser.
+    pub fn open_rendered_file(&mut self, path: &std::path::Path) {
+        let result = open_path(path);
+        match result {
+            Ok(()) => self.set_status(format!("Opened {}", path.display())),
+            Err(e) => self.set_status(format!("Rendered {} (open failed: {e})", path.display())),
+        }
+    }
+
     /// Evaluate the document to get meshes.
     pub fn evaluate(&mut self) -> Result<()> {
         self.meshes = evaluate_document(&self.document)?;
@@ -925,7 +1025,7 @@ impl App {
     /// Get triangles for rendering, with pick IDs per mesh.
     pub fn get_triangles(&self) -> Vec<Triangle> {
         let mut triangles = Vec::new();
-        let color = [180u8, 180, 190];
+        let color = [145u8, 190, 225];
 
         for (mesh_idx, mesh) in self.meshes.iter().enumerate() {
             let pick_id = if mesh_idx < self.document.roots.len() {
@@ -935,7 +1035,7 @@ impl App {
             };
 
             let mesh_color = if self.selected.contains(&(pick_id as u64)) {
-                [220u8, 100, 140]
+                [255u8, 125, 175]
             } else {
                 color
             };
@@ -1078,12 +1178,12 @@ impl App {
                 let size = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(20.0);
                 self.add_cube(size)?;
             }
-            "cylinder" | "cyl" | "add cylinder" => {
+            "cylinder" | "cyl" | "tube" | "add cylinder" => {
                 let radius = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(10.0);
                 let height = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(20.0);
                 self.add_cylinder(radius, height)?;
             }
-            "sphere" | "add sphere" => {
+            "sphere" | "ball" | "add sphere" => {
                 let radius = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(10.0);
                 self.add_sphere(radius)?;
             }
@@ -1101,18 +1201,18 @@ impl App {
                 let dz = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0.0);
                 self.translate_selected(dx, dy, dz)?;
             }
-            "rotate" => {
+            "rotate" | "spin" | "turn" => {
                 let rx = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0.0);
                 let ry = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0.0);
                 let rz = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0.0);
                 self.rotate_selected(rx, ry, rz)?;
             }
-            "scale" => {
+            "scale" | "resize" => {
                 let s = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(2.0);
                 self.scale_selected(s, s, s)?;
             }
-            "union" => self.boolean_union()?,
-            "difference" | "subtract" => self.boolean_difference()?,
+            "union" | "combine" => self.boolean_union()?,
+            "difference" | "subtract" | "cut" => self.boolean_difference()?,
             "intersection" | "intersect" => self.boolean_intersection()?,
             "fillet" => {
                 let r = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(2.0);
@@ -1130,7 +1230,7 @@ impl App {
                 let count = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(3);
                 self.pattern_selected(count)?;
             }
-            "mirror" => self.mirror_selected()?,
+            "mirror" | "flip" => self.mirror_selected()?,
             "save" => {
                 if let Some(path) = parts.get(1) {
                     self.save_as(PathBuf::from(path))?;
@@ -1138,13 +1238,50 @@ impl App {
                     self.save()?;
                 }
             }
-            "export" => {
+            "export" | "export_stl" => {
                 if let Some(path) = parts.get(1) {
                     let path = PathBuf::from(path);
                     self.export_stl(&path)?;
                     self.set_status(format!("Exported to {}", path.display()));
                 } else {
                     self.set_status("Usage: export <path.stl>");
+                }
+            }
+            "render" | "screenshot" | "image" | "png" => {
+                if parts.len() == 1 {
+                    self.tool_input = Some(ToolInput::text(
+                        "Render PNG",
+                        "vcad-render.png",
+                        "render {}".to_string(),
+                    ));
+                    self.set_status("Render PNG: enter output path");
+                    return Ok(());
+                }
+
+                let mut path = PathBuf::from("vcad-render.png");
+                let mut width = 1920;
+                let mut height = 1080;
+                let mut open = true;
+
+                for arg in &parts[1..] {
+                    if *arg == "--open" || *arg == "open" {
+                        open = true;
+                    } else if *arg == "--no-open" || *arg == "no-open" {
+                        open = false;
+                    } else if let Some((w, h)) = arg.split_once('x') {
+                        if let (Ok(w), Ok(h)) = (w.parse::<u32>(), h.parse::<u32>()) {
+                            width = w;
+                            height = h;
+                        }
+                    } else if let Ok(w) = arg.parse::<u32>() {
+                        width = w;
+                    } else {
+                        path = PathBuf::from(arg);
+                    }
+                }
+
+                if self.render_png(&path, width, height)? && open {
+                    self.open_rendered_file(&path);
                 }
             }
             "undo" => self.undo()?,
@@ -1168,13 +1305,42 @@ impl App {
             "open" => self.set_status("Open: drag a .vcad file into the terminal"),
             "export_glb" => self.set_status("Export GLB: not yet implemented in TUI"),
             "export_step" => self.set_status("Export STEP: not yet implemented in TUI"),
-            "select_all" => {
+            "select" => {
+                if parts.len() < 2 {
+                    self.set_status("Usage: select <id> [id...]");
+                } else {
+                    let selection_before = self.selected.clone();
+                    let valid_roots: std::collections::HashSet<_> =
+                        self.get_parts().into_iter().map(|(id, _)| id).collect();
+                    self.selected.clear();
+                    for raw in &parts[1..] {
+                        if let Ok(id) = raw.parse::<NodeId>() {
+                            if valid_roots.contains(&id) {
+                                self.selected.insert(id);
+                            }
+                        }
+                    }
+                    if self.selected != selection_before {
+                        self.render_dirty = true;
+                    }
+                    self.set_status(format!("Selected {} parts", self.selected.len()));
+                    self.auto_switch_tab();
+                }
+            }
+            "select_all" | "all" => {
+                let selection_before = self.selected.clone();
                 let ids: Vec<_> = self.get_parts().into_iter().map(|(id, _)| id).collect();
                 self.selected = ids.into_iter().collect();
+                if self.selected != selection_before {
+                    self.render_dirty = true;
+                }
                 self.set_status(format!("Selected {} parts", self.selected.len()));
             }
-            "deselect" => {
-                self.selected.clear();
+            "deselect" | "clear_selection" => {
+                if !self.selected.is_empty() {
+                    self.selected.clear();
+                    self.render_dirty = true;
+                }
                 self.set_status("Deselected");
             }
             "toggle_sidebar" => {
@@ -1187,32 +1353,43 @@ impl App {
                 self.chat.open = !self.chat.open;
                 self.chat.focused = self.chat.open;
             }
+            "clear" => {
+                self.chat_session.abort();
+                self.chat_session.messages.clear();
+                self.chat_session.event_rx = None;
+                self.chat_session.assistant_buffer.clear();
+                self.chat_session.pending_tools.clear();
+                self.chat_session.in_flight = false;
+                self.chat.clear();
+                crate::chat_session::clear_history();
+                self.set_status("Chat cleared");
+            }
             "toggle_wireframe" => self.set_status("Wireframe: not yet implemented in TUI"),
-            "cycle_theme" => {
+            "cycle_theme" | "theme" => {
                 let name = crate::ui::theme::toggle();
                 self.set_status(format!("Theme: {name}"));
             }
-            "camera_iso" => {
+            "camera_iso" | "iso" => {
                 self.camera
                     .set_orbit(45.0, 30.0, 100.0, crate::render::Vec3::new(0.0, 0.0, 0.0));
                 self.set_status("Isometric view");
             }
-            "camera_top" => {
+            "camera_top" | "top" => {
                 self.camera
                     .set_orbit(0.0, 89.0, 100.0, crate::render::Vec3::new(0.0, 0.0, 0.0));
                 self.set_status("Top view");
             }
-            "camera_front" => {
+            "camera_front" | "front" => {
                 self.camera
                     .set_orbit(0.0, 0.0, 100.0, crate::render::Vec3::new(0.0, 0.0, 0.0));
                 self.set_status("Front view");
             }
-            "camera_right" => {
+            "camera_right" | "right" => {
                 self.camera
                     .set_orbit(90.0, 0.0, 100.0, crate::render::Vec3::new(0.0, 0.0, 0.0));
                 self.set_status("Right view");
             }
-            "camera_fit" => {
+            "camera_fit" | "fit" => {
                 self.camera.zoom_to_fit(80, 40);
                 self.set_status("Fit to screen");
             }
@@ -1238,6 +1415,26 @@ impl App {
 
         Ok(())
     }
+}
+
+fn open_path(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    let mut cmd = std::process::Command::new("open");
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", "start", ""]);
+        c
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = std::process::Command::new("xdg-open");
+
+    cmd.arg(path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
 }
 
 /// Evaluate a document to meshes using the canonical vcad-eval evaluator.
@@ -1304,6 +1501,11 @@ pub fn evaluate_document_timed(
 pub fn run_tui(file: Option<PathBuf>) -> Result<()> {
     crate::ui::theme::init();
 
+    // Load/evaluate the document before taking over the terminal. If the file
+    // is missing or invalid, the error can print normally and the shell is not
+    // left in raw mode / alt-screen.
+    let mut app = App::new(file)?;
+
     // Install panic + stderr capture BEFORE entering alt-screen. Any early
     // stderr writes (e.g. from a failing terminal capability probe) end up
     // in the log store instead of corrupting the cell buffer.
@@ -1311,30 +1513,34 @@ pub fn run_tui(file: Option<PathBuf>) -> Result<()> {
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(
+    if let Err(e) = execute!(
         stdout,
         EnterAlternateScreen,
         EnableMouseCapture,
         cursor::Hide
-    )?;
-
-    let mut app = App::new(file)?;
+    ) {
+        let _ = disable_raw_mode();
+        return Err(e.into());
+    }
 
     let result = run_loop(&mut stdout, &mut app, &capture);
 
-    disable_raw_mode()?;
-    execute!(
+    let cleanup_result = execute!(
         stdout,
         LeaveAlternateScreen,
         DisableMouseCapture,
         cursor::Show
-    )?;
+    );
+    let raw_result = disable_raw_mode();
 
     // `capture` drops here — fd 2 is restored before we return so any
     // error printed by the caller goes to the real tty.
     drop(capture);
 
-    result
+    result?;
+    cleanup_result?;
+    raw_result?;
+    Ok(())
 }
 
 fn run_loop(
@@ -1346,6 +1552,7 @@ fn run_loop(
     let mut cell_buffer = CellBuffer::new(term_w, term_h);
     let mut render_buffer = RenderBuffer::new(80, 40);
     let mut last_camera = app.camera.snapshot();
+    let mut last_overlay_mask = overlay_mask(app);
     let mut gfx = GraphicsOutput::new();
     let protocol = gfx.protocol();
     let proto_name = match protocol {
@@ -1367,13 +1574,23 @@ fn run_loop(
             app.render_dirty = true;
         }
 
-        // Size render buffer based on protocol
+        // Size render buffer based on protocol. For pixel protocols prefer the
+        // terminal's reported pixel size; guessed cell dimensions are visibly
+        // wrong on Ghostty and other terminals with non-default fonts/scaling.
         let (viewport_width, viewport_height) = match protocol {
             GraphicsProtocol::Kitty | GraphicsProtocol::ITerm2 | GraphicsProtocol::Sixel => {
-                let caps = gfx.caps();
-                let w = area.width as u32 * caps.cell_width;
-                let h = area.height as u32 * caps.cell_height;
-                (w, h)
+                match terminal::window_size() {
+                    Ok(size) if size.width > 0 && size.height > 0 => {
+                        (size.width as u32, size.height as u32)
+                    }
+                    _ => {
+                        let caps = gfx.caps();
+                        (
+                            area.width as u32 * caps.cell_width,
+                            area.height as u32 * caps.cell_height,
+                        )
+                    }
+                }
             }
             GraphicsProtocol::HalfBlock => (area.width as u32, (area.height as u32) * 2),
             GraphicsProtocol::Braille => ((area.width as u32) * 2, (area.height as u32) * 4),
@@ -1384,7 +1601,14 @@ fn run_loop(
             app.render_dirty = true;
         }
 
-        // Only re-render 3D scene when something changed
+        // Only re-render 3D scene when something changed. In pixel-protocol
+        // mode the viewport image sits behind text overlays, so redraw it when
+        // a large overlay closes; otherwise stale text remains burned into the
+        // terminal until the next camera/document change.
+        let current_overlay_mask = overlay_mask(app);
+        if is_pixel_protocol(protocol) && current_overlay_mask != last_overlay_mask {
+            app.render_dirty = true;
+        }
         let current_camera = app.camera.snapshot();
         let viewport_dirty = app.render_dirty || current_camera != last_camera;
         if viewport_dirty {
@@ -1404,11 +1628,19 @@ fn run_loop(
         match protocol {
             GraphicsProtocol::Kitty | GraphicsProtocol::ITerm2 | GraphicsProtocol::Sixel => {
                 if viewport_dirty {
-                    // Move cursor to top-left and output pixel-perfect image
+                    // Move cursor to top-left and output pixel-perfect image.
+                    // The image overwrites already-flushed overlay cells on
+                    // screen, so invalidate the text diff buffer and force the
+                    // chrome to repaint on top in this same frame.
                     execute!(stdout, crossterm::cursor::MoveTo(0, 0))?;
                     gfx.display(&render_buffer, stdout)?;
+                    cell_buffer.invalidate_all();
                 }
-                // Overlay UI via CellBuffer on top
+                // Overlay UI via CellBuffer on top. Because Kitty/Ghostty
+                // images live outside the text buffer, explicitly begin from
+                // an empty text layer so closed overlays are erased instead of
+                // accumulating as stale terminal text.
+                cell_buffer.begin_overlay_frame();
                 ui::draw_overlays(&mut cell_buffer, app);
             }
             GraphicsProtocol::HalfBlock => {
@@ -1421,6 +1653,7 @@ fn run_loop(
 
         // Flush only changed cells
         cell_buffer.flush(stdout)?;
+        last_overlay_mask = current_overlay_mask;
 
         // Drain captured stderr/panic lines into the log ring buffer so
         // the status bar surfaces them instead of a corrupt display.
@@ -1457,6 +1690,24 @@ fn run_loop(
     }
 
     Ok(())
+}
+
+fn is_pixel_protocol(protocol: GraphicsProtocol) -> bool {
+    matches!(
+        protocol,
+        GraphicsProtocol::Kitty | GraphicsProtocol::ITerm2 | GraphicsProtocol::Sixel
+    )
+}
+
+fn overlay_mask(app: &App) -> (bool, bool, bool, bool, bool, bool) {
+    (
+        app.show_welcome,
+        app.chat.open,
+        app.command_mode(),
+        app.sidebar_visible,
+        app.menu_state.is_open(),
+        app.is_orbiting,
+    )
 }
 
 /// Render the scene using CPU ray tracing and copy into the RenderBuffer.

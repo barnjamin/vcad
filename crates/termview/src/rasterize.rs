@@ -286,8 +286,10 @@ pub fn render_scene(buffer: &mut RenderBuffer, triangles: &[Triangle], camera: &
         return;
     }
 
-    // Light direction (from top-right-front)
-    let light_dir = Vec3::new(0.5, 0.8, 0.3).normalize();
+    // CAD-style lighting: keep shadows open enough that dark faces do not
+    // read as holes in low-resolution terminal output.
+    let key_light_dir = Vec3::new(0.5, 0.8, 0.3).normalize();
+    let fill_light_dir = Vec3::new(-0.6, 0.35, -0.4).normalize();
 
     for tri in triangles {
         let v0 = Vec3::new(tri.v0[0], tri.v0[1], tri.v0[2]);
@@ -329,14 +331,17 @@ pub fn render_scene(buffer: &mut RenderBuffer, triangles: &[Triangle], camera: &
         } else {
             normal
         };
-        let ndotl = shading_normal.dot(light_dir).max(0.0);
-        let ambient = 0.3;
-        let diffuse = 0.7;
-        let intensity = ambient + diffuse * ndotl;
+        let key = shading_normal.dot(key_light_dir).max(0.0);
+        let fill = shading_normal.dot(fill_light_dir).max(0.0);
+        let head = shading_normal.dot(view_dir).abs();
+        let rim = (1.0 - head).clamp(0.0, 1.0);
+        let intensity = (0.56 + 0.24 * key + 0.12 * fill + 0.30 * head + 0.06 * rim).min(1.25);
 
+        // Slight cool highlight bias gives shape without crushing shadowed faces
+        // into the viewport background.
         let lit_r = ((tri.color[0] as f32) * intensity).min(255.0) as u8;
         let lit_g = ((tri.color[1] as f32) * intensity).min(255.0) as u8;
-        let lit_b = ((tri.color[2] as f32) * intensity).min(255.0) as u8;
+        let lit_b = (((tri.color[2] as f32) * intensity) + (10.0 * rim)).min(255.0) as u8;
 
         // Bounding box
         let min_x = s0.0.min(s1.0).min(s2.0).max(0.0) as u32;
@@ -366,8 +371,54 @@ pub fn render_scene(buffer: &mut RenderBuffer, triangles: &[Triangle], camera: &
         }
     }
 
+    render_silhouette_outline(buffer);
+
     // Axis indicator (bottom-left corner, rendered last so it's on top)
     render_axis_indicator(buffer, camera, 4, buffer.height.saturating_sub(34), 30);
+}
+
+/// Add a one-pixel object outline / crease pass from the pick/depth buffers.
+fn render_silhouette_outline(buffer: &mut RenderBuffer) {
+    if buffer.width < 3 || buffer.height < 3 {
+        return;
+    }
+
+    let width = buffer.width as usize;
+    let height = buffer.height as usize;
+
+    // This pass is on the hot path for keyboard nudges/camera moves. It used
+    // to clone the full RGBA buffer and allocate a second outline index list on
+    // every frame; at Kitty/iTerm pixel resolutions that is several megabytes
+    // of churn per key repeat. Edge detection only reads pick/depth buffers, so
+    // it is safe to darken each outline pixel in place as soon as it is found.
+    for y in 1..height - 1 {
+        for x in 1..width - 1 {
+            let idx = y * width + x;
+            let pick_id = buffer.pick_ids[idx];
+            if pick_id == 0 {
+                continue;
+            }
+
+            let depth = buffer.depth[idx];
+            let mut edge = false;
+            for nidx in [idx - 1, idx + 1, idx - width, idx + width] {
+                if buffer.pick_ids[nidx] != pick_id
+                    || (buffer.depth[nidx].is_finite()
+                        && (buffer.depth[nidx] - depth).abs() > 0.015)
+                {
+                    edge = true;
+                    break;
+                }
+            }
+
+            if edge {
+                let base = idx * 4;
+                buffer.pixels[base] = ((buffer.pixels[base] as f32) * 0.55) as u8;
+                buffer.pixels[base + 1] = ((buffer.pixels[base + 1] as f32) * 0.58) as u8;
+                buffer.pixels[base + 2] = ((buffer.pixels[base + 2] as f32) * 0.65) as u8;
+            }
+        }
+    }
 }
 
 /// Render a ground plane grid on the XZ plane (Y=0) with adaptive spacing.
@@ -404,7 +455,11 @@ fn render_ground_grid(buffer: &mut RenderBuffer, camera: &Camera, mvp: &Mat4) {
     for i in -half_extent..=half_extent {
         let coord = i as f32 * spacing;
         let is_major = i % major_every == 0;
-        let color: [u8; 3] = if is_major { [60, 60, 65] } else { [40, 40, 44] };
+        let color: [u8; 3] = if is_major {
+            [92, 98, 112]
+        } else {
+            [58, 62, 72]
+        };
 
         // X-aligned line at z=coord: thin quad from (lo, 0, coord-hw) to (hi, 0, coord+hw)
         let lo = -half_extent as f32 * spacing;
@@ -438,7 +493,7 @@ fn render_ground_grid(buffer: &mut RenderBuffer, camera: &Camera, mvp: &Mat4) {
     }
 }
 
-/// Rasterize a thin grid-line quad (two triangles, no lighting, pick_id=0).
+/// Rasterize a construction-grid line as a screen-space guide.
 #[allow(clippy::too_many_arguments)]
 fn rasterize_grid_line(
     buffer: &mut RenderBuffer,
@@ -451,47 +506,112 @@ fn rasterize_grid_line(
     v3: Vec3,
     color: [u8; 3],
 ) {
-    let verts = [v0, v1, v2, v3];
-    let tris = [(0, 1, 2), (0, 2, 3)];
+    // Older code rendered each grid line as a fat 3D quad. At grazing angles
+    // those quads became broad rectangles and looked like axes cutting through
+    // the model. Use the quad only to recover its *long-axis* centerline, then
+    // draw a constant-width screen-space guide that never writes depth.
+    let long_x = v1.sub(v0).dot(v1.sub(v0)) >= v3.sub(v0).dot(v3.sub(v0));
+    let (a, b) = if long_x {
+        // Long sides are v0→v1 and v3→v2; centerline runs between their midpoints.
+        (
+            Vec3::new(
+                (v0.x + v3.x) * 0.5,
+                (v0.y + v3.y) * 0.5,
+                (v0.z + v3.z) * 0.5,
+            ),
+            Vec3::new(
+                (v1.x + v2.x) * 0.5,
+                (v1.y + v2.y) * 0.5,
+                (v1.z + v2.z) * 0.5,
+            ),
+        )
+    } else {
+        // Long sides are v0→v3 and v1→v2; centerline runs between their midpoints.
+        (
+            Vec3::new(
+                (v0.x + v1.x) * 0.5,
+                (v0.y + v1.y) * 0.5,
+                (v0.z + v1.z) * 0.5,
+            ),
+            Vec3::new(
+                (v3.x + v2.x) * 0.5,
+                (v3.y + v2.y) * 0.5,
+                (v3.z + v2.z) * 0.5,
+            ),
+        )
+    };
 
-    for (a, b, c) in tris {
-        let (p0x, p0y, p0z, p0w) = mvp.transform_point(verts[a]);
-        let (p1x, p1y, p1z, p1w) = mvp.transform_point(verts[b]);
-        let (p2x, p2y, p2z, p2w) = mvp.transform_point(verts[c]);
+    let Some((x0, y0)) = project_grid_point(mvp, w, h, a) else {
+        return;
+    };
+    let Some((x1, y1)) = project_grid_point(mvp, w, h, b) else {
+        return;
+    };
 
-        if p0w < 0.1 || p1w < 0.1 || p2w < 0.1 {
-            continue;
-        }
+    draw_grid_line(buffer, x0, y0, x1, y1, color);
+}
 
-        let s0 = ((p0x + 1.0) * 0.5 * w, (1.0 - p0y) * 0.5 * h, p0z);
-        let s1 = ((p1x + 1.0) * 0.5 * w, (1.0 - p1y) * 0.5 * h, p1z);
-        let s2 = ((p2x + 1.0) * 0.5 * w, (1.0 - p2y) * 0.5 * h, p2z);
+fn project_grid_point(mvp: &Mat4, w: f32, h: f32, p: Vec3) -> Option<(i32, i32)> {
+    let (px, py, _, pw) = mvp.transform_point(p);
+    if pw < 0.1 {
+        return None;
+    }
+    Some((((px + 1.0) * 0.5 * w) as i32, ((1.0 - py) * 0.5 * h) as i32))
+}
 
-        let screen_area = edge_function((s0.0, s0.1), (s1.0, s1.1), (s2.0, s2.1));
-        if screen_area.abs() < 0.001 {
-            continue;
-        }
+fn plot_grid_pixel(buffer: &mut RenderBuffer, px: u32, py: u32, color: [u8; 3]) {
+    if px >= buffer.width || py >= buffer.height {
+        return;
+    }
+    let idx = (py * buffer.width + px) as usize;
+    buffer.pixels[idx * 4] = color[0];
+    buffer.pixels[idx * 4 + 1] = color[1];
+    buffer.pixels[idx * 4 + 2] = color[2];
+    buffer.pixels[idx * 4 + 3] = 255;
+}
 
-        let min_x = s0.0.min(s1.0).min(s2.0).max(0.0) as u32;
-        let max_x = s0.0.max(s1.0).max(s2.0).min(w - 1.0) as u32;
-        let min_y = s0.1.min(s1.1).min(s2.1).max(0.0) as u32;
-        let max_y = s0.1.max(s1.1).max(s2.1).min(h - 1.0) as u32;
+/// Draw a subtle viewport guide line. It intentionally does not modify depth
+/// or pick IDs so model geometry always covers it.
+fn draw_grid_line(buffer: &mut RenderBuffer, x0: i32, y0: i32, x1: i32, y1: i32, color: [u8; 3]) {
+    let dx = (x1 - x0).abs();
+    let dy_abs = (y1 - y0).abs();
+    let dy = -dy_abs;
+    let sx = if x0 < x1 { 1 } else { -1 };
+    let sy = if y0 < y1 { 1 } else { -1 };
+    let mut err = dx + dy;
+    let mut x = x0;
+    let mut y = y0;
 
-        for y in min_y..=max_y {
-            for x in min_x..=max_x {
-                let p = (x as f32 + 0.5, y as f32 + 0.5);
-                let w0 = edge_function((s1.0, s1.1), (s2.0, s2.1), p);
-                let w1 = edge_function((s2.0, s2.1), (s0.0, s0.1), p);
-                let w2 = edge_function((s0.0, s0.1), (s1.0, s1.1), p);
+    loop {
+        if x >= 0 && y >= 0 {
+            let px = x as u32;
+            let py = y as u32;
+            if px < buffer.width && py < buffer.height {
+                plot_grid_pixel(buffer, px, py, color);
 
-                let inside =
-                    (w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0) || (w0 <= 0.0 && w1 <= 0.0 && w2 <= 0.0);
-
-                if inside {
-                    let z = (w0 * s0.2 + w1 * s1.2 + w2 * s2.2) / screen_area;
-                    buffer.set_pixel_with_id(x, y, z, color, 0);
+                // Major guide lines need a little screen-space weight to survive
+                // half-block/braille downsampling, but keep it constant-width so
+                // they never become world-space rectangles at grazing angles.
+                if color[0] > 80 {
+                    if dx >= dy_abs {
+                        plot_grid_pixel(buffer, px, py.saturating_add(1), color);
+                    } else {
+                        plot_grid_pixel(buffer, px.saturating_add(1), py, color);
+                    }
                 }
             }
+        }
+        if x == x1 && y == y1 {
+            break;
+        }
+        let e2 = 2 * err;
+        if e2 >= dy {
+            err += dy;
+            x += sx;
+        }
+        if e2 <= dx {
+            err += dx;
+            y += sy;
         }
     }
 }

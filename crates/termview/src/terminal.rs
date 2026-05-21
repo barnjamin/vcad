@@ -98,9 +98,23 @@ impl TerminalCaps {
                 return Self::kitty_with_tmux(false);
             }
 
-            // 3. Check for Ghostty (supports Kitty protocol)
+            // 3. Ghostty advertises Kitty graphics, but vcad's TUI uses a
+            // full-screen image as the viewport with terminal text composited
+            // on top for menus/chat. Ghostty's Kitty image layer semantics make
+            // that composition unreliable (images can cover text, stale text can
+            // remain visible, and panel backgrounds may not occlude the image).
+            // Prefer the cell-native renderer by default; users can still opt in
+            // with TERMVIEW_PROTOCOL=kitty when they want to test pixel graphics.
             if env::var("GHOSTTY_BIN_DIR").is_ok() {
-                return Self::kitty_with_tmux(false);
+                return Self {
+                    protocol: GraphicsProtocol::HalfBlock,
+                    true_color: true,
+                    width_px: None,
+                    height_px: None,
+                    cell_width: 8,
+                    cell_height: 16,
+                    in_tmux,
+                };
             }
 
             // 4. Check for iTerm2
