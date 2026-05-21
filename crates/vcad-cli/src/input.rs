@@ -720,19 +720,35 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
             }
             KeyCode::Backspace => {
                 app.chat.input.pop();
+                app.chat.slash_selected_index = 0;
             }
             KeyCode::Up => {
                 if key.modifiers.contains(KeyModifiers::SHIFT) {
                     app.chat.scroll = app.chat.scroll.saturating_add(1);
                 } else {
-                    app.chat.history_up();
+                    let suggestions = crate::ui::chat::slash_command_suggestions(&app.chat.input);
+                    if !suggestions.is_empty() {
+                        app.chat.slash_selected_index = app
+                            .chat
+                            .slash_selected_index
+                            .saturating_sub(1)
+                            .min(suggestions.len().saturating_sub(1));
+                    } else {
+                        app.chat.history_up();
+                    }
                 }
             }
             KeyCode::Down => {
                 if key.modifiers.contains(KeyModifiers::SHIFT) {
                     app.chat.scroll = app.chat.scroll.saturating_sub(1);
                 } else {
-                    app.chat.history_down();
+                    let suggestions = crate::ui::chat::slash_command_suggestions(&app.chat.input);
+                    if !suggestions.is_empty() {
+                        app.chat.slash_selected_index = (app.chat.slash_selected_index + 1)
+                            .min(suggestions.len().saturating_sub(1));
+                    } else {
+                        app.chat.history_down();
+                    }
                 }
             }
             KeyCode::PageUp => {
@@ -742,12 +758,17 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
                 app.chat.scroll = app.chat.scroll.saturating_sub(5);
             }
             KeyCode::Tab => {
-                if let Some(name) = crate::ui::chat::slash_command_completion(&app.chat.input) {
+                if let Some(name) = crate::ui::chat::slash_command_completion_at(
+                    &app.chat.input,
+                    app.chat.slash_selected_index,
+                ) {
                     app.chat.input = format!("/{name} ");
+                    app.chat.slash_selected_index = 0;
                 }
             }
             KeyCode::Char(c) => {
                 app.chat.input.push(c);
+                app.chat.slash_selected_index = 0;
             }
             _ => {}
         }

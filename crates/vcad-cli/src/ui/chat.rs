@@ -38,6 +38,8 @@ pub struct SlashCommandSuggestion {
     aliases: &'static [&'static str],
 }
 
+const MAX_SLASH_SUGGESTIONS: usize = 5;
+
 const SLASH_COMMANDS: &[SlashCommandSuggestion] = &[
     SlashCommandSuggestion {
         name: "cube",
@@ -196,10 +198,10 @@ const SLASH_COMMANDS: &[SlashCommandSuggestion] = &[
         aliases: &[],
     },
     SlashCommandSuggestion {
-        name: "clear_chat",
-        usage: "clear_chat",
+        name: "clear",
+        usage: "clear",
         description: "Clear chat history",
-        aliases: &["chat_clear"],
+        aliases: &[],
     },
     SlashCommandSuggestion {
         name: "toggle_sidebar",
@@ -269,31 +271,63 @@ pub fn slash_command_suggestions(input: &str) -> Vec<SlashCommandSuggestion> {
         .unwrap_or("")
         .to_lowercase();
     if query.is_empty() {
-        return SLASH_COMMANDS.iter().copied().take(6).collect();
+        return SLASH_COMMANDS
+            .iter()
+            .copied()
+            .take(MAX_SLASH_SUGGESTIONS)
+            .collect();
     }
 
-    let mut exactish: Vec<_> = SLASH_COMMANDS
+    let mut scored: Vec<(u8, usize, SlashCommandSuggestion)> = SLASH_COMMANDS
         .iter()
         .copied()
-        .filter(|cmd| {
-            cmd.name.starts_with(&query)
-                || cmd.aliases.iter().any(|alias| alias.starts_with(&query))
+        .filter_map(|cmd| {
+            let name = cmd.name;
+            let description = cmd.description.to_lowercase();
+            let alias_prefix = cmd.aliases.iter().any(|alias| alias.starts_with(&query));
+            let alias_contains = cmd.aliases.iter().any(|alias| alias.contains(&query));
+
+            let rank = if name == query {
+                0
+            } else if name.starts_with(&query) {
+                // Prefer the canonical command name over aliases, so `/clea`
+                // completes to `clear` instead of `deselect`'s
+                // `clear_selection` alias.
+                1
+            } else if alias_prefix {
+                2
+            } else if name.contains(&query) {
+                3
+            } else if alias_contains {
+                4
+            } else if description.contains(&query) {
+                5
+            } else {
+                return None;
+            };
+            Some((rank, name.len(), cmd))
         })
         .collect();
-    let fuzzy = SLASH_COMMANDS.iter().copied().filter(|cmd| {
-        !(cmd.name.starts_with(&query) || cmd.aliases.iter().any(|alias| alias.starts_with(&query)))
-            && (cmd.name.contains(&query)
-                || cmd.description.to_lowercase().contains(&query)
-                || cmd.aliases.iter().any(|alias| alias.contains(&query)))
-    });
-    exactish.extend(fuzzy);
-    exactish.truncate(6);
-    exactish
+
+    scored.sort_by_key(|(rank, name_len, cmd)| (*rank, *name_len, cmd.name));
+    scored
+        .into_iter()
+        .take(MAX_SLASH_SUGGESTIONS)
+        .map(|(_, _, cmd)| cmd)
+        .collect()
 }
 
 /// Completion text for Tab in the chat input.
 pub fn slash_command_completion(input: &str) -> Option<&'static str> {
-    slash_command_suggestions(input).first().map(|cmd| cmd.name)
+    slash_command_completion_at(input, 0)
+}
+
+/// Completion text for Tab using the currently highlighted suggestion.
+pub fn slash_command_completion_at(input: &str, selected_index: usize) -> Option<&'static str> {
+    let suggestions = slash_command_suggestions(input);
+    suggestions
+        .get(selected_index.min(suggestions.len().saturating_sub(1)))
+        .map(|cmd| cmd.name)
 }
 
 /// Persistent chat sidebar state.
@@ -313,6 +347,9 @@ pub struct ChatPanel {
     pub history_index: Option<usize>,
     /// Scroll offset (0 = bottom, increases upward).
     pub scroll: usize,
+    /// Highlighted slash-command suggestion. Tab completes this row; Up/Down
+    /// change it while slash suggestions are visible.
+    pub slash_selected_index: usize,
     /// Saved input when navigating history.
     saved_input: String,
 }
@@ -330,6 +367,7 @@ impl ChatPanel {
             history: Vec::new(),
             history_index: None,
             scroll: 0,
+            slash_selected_index: 0,
             saved_input: String::new(),
         }
     }
@@ -395,6 +433,7 @@ impl ChatPanel {
         self.saved_input.clear();
         self.input.clear();
         self.scroll = 0;
+        self.slash_selected_index = 0;
         Some(msg)
     }
 
@@ -411,6 +450,7 @@ impl ChatPanel {
         self.input.clear();
         self.saved_input.clear();
         self.scroll = 0;
+        self.slash_selected_index = 0;
     }
 }
 
@@ -694,21 +734,25 @@ pub fn draw_chat(buf: &mut CellBuffer, panel: &ChatPanel, in_flight: bool, area:
         theme::SURFACE(),
     );
 
-    // Input text
+    // Input text. Keep the cursor/end visible for long commands instead of
+    // letting new text disappear beyond the right edge.
     let max_input = (inner_right - inner_left - 2) as usize;
-    for (i, ch) in panel.input.chars().take(max_input).enumerate() {
+    let input_chars: Vec<char> = panel.input.chars().collect();
+    let input_len = input_chars.len();
+    let skip = input_len.saturating_sub(max_input);
+    for (i, ch) in input_chars.iter().skip(skip).take(max_input).enumerate() {
         set_char(
             buf,
             inner_left + 2 + i as u16,
             input_y,
-            ch,
+            *ch,
             theme::TEXT(),
             theme::SURFACE(),
         );
     }
 
     // Cursor
-    let cursor_x = inner_left + 2 + panel.input.len().min(max_input) as u16;
+    let cursor_x = inner_left + 2 + input_len.min(max_input) as u16;
     if cursor_x < inner_right {
         set_char(
             buf,
@@ -755,15 +799,31 @@ fn draw_slash_command_suggestions(
     let inner_left = left + 1;
     let inner_right = right;
 
+    let selected = panel.slash_selected_index.min(max_rows.saturating_sub(1));
     for (row, suggestion) in suggestions.iter().take(max_rows).enumerate() {
         let y = start_y + row as u16;
         if y <= top || y >= input_sep_y {
             continue;
         }
 
+        let is_selected = row == selected;
+        let bg = if is_selected {
+            theme::SELECTION_BG()
+        } else {
+            theme::CARD()
+        };
+        let usage_fg = if is_selected {
+            theme::ACCENT()
+        } else {
+            theme::TEXT()
+        };
+
         for x in (left + 1)..right {
-            set_char(buf, x, y, ' ', theme::CARD(), theme::CARD());
+            set_char(buf, x, y, ' ', bg, bg);
         }
+
+        let marker = if is_selected { '›' } else { ' ' };
+        set_char(buf, inner_left, y, marker, theme::ACCENT(), bg);
 
         let usage = format!("/{}", suggestion.usage);
         let mut cx = inner_left + 1;
@@ -771,21 +831,14 @@ fn draw_slash_command_suggestions(
             if cx >= inner_right {
                 break;
             }
-            set_char(buf, cx, y, ch, theme::TEXT(), theme::CARD());
+            set_char(buf, cx, y, ch, usage_fg, bg);
             cx += 1;
         }
 
         let desc_x = inner_right.saturating_sub(suggestion.description.len() as u16 + 1);
         if desc_x > cx + 1 {
             for (i, ch) in suggestion.description.chars().enumerate() {
-                set_char(
-                    buf,
-                    desc_x + i as u16,
-                    y,
-                    ch,
-                    theme::TEXT_MUTED(),
-                    theme::CARD(),
-                );
+                set_char(buf, desc_x + i as u16, y, ch, theme::TEXT_MUTED(), bg);
             }
         }
     }
@@ -897,5 +950,10 @@ mod tests {
     #[test]
     fn zero_width_returns_full_text() {
         assert_eq!(wrap_text("anything", 0), vec!["anything".to_string()]);
+    }
+
+    #[test]
+    fn slash_completion_prefers_canonical_name_prefix_over_alias() {
+        assert_eq!(slash_command_completion("/clea"), Some("clear"));
     }
 }

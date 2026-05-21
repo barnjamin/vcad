@@ -1353,7 +1353,7 @@ impl App {
                 self.chat.open = !self.chat.open;
                 self.chat.focused = self.chat.open;
             }
-            "clear_chat" | "chat_clear" => {
+            "clear" => {
                 self.chat_session.abort();
                 self.chat_session.messages.clear();
                 self.chat_session.event_rx = None;
