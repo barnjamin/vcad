@@ -1,9 +1,0 @@
-{
-  "id": "2026-05-18-cli-tui-viewport-colors",
-  "version": "0.9.4",
-  "date": "2026-05-18",
-  "category": "feat",
-  "title": "Improve CLI viewport colors",
-  "summary": "CLI TUI rendering now uses brighter CAD-style shading and outlines so shadowed faces no longer read as holes.",
-  "features": ["cli", "tui", "rendering"]
-}

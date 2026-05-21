@@ -1,9 +1,0 @@
-{
-  "id": "2026-05-18-cli-tui-render-command",
-  "version": "0.9.4",
-  "date": "2026-05-18",
-  "category": "feat",
-  "title": "Add CLI TUI render command",
-  "summary": "The CLI TUI can now render the current viewport to a PNG and open it in the default image viewer.",
-  "features": ["cli", "tui", "rendering"]
-}

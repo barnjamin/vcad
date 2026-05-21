@@ -1,9 +1,0 @@
-{
-  "id": "2026-05-20-chat-openrouter-ollama",
-  "version": "0.9.4",
-  "date": "2026-05-20",
-  "category": "feat",
-  "title": "Chat can use OpenRouter or Ollama",
-  "summary": "The chat API now supports OpenAI-compatible backends so local TUI users can route vcad chat through OpenRouter, OpenAI-compatible servers, or Ollama.",
-  "features": ["chat", "cli", "tui", "ai"]
-}

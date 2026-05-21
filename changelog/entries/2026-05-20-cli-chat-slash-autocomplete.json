@@ -1,9 +1,0 @@
-{
-  "id": "2026-05-20-cli-chat-slash-autocomplete",
-  "version": "0.9.4",
-  "date": "2026-05-20",
-  "category": "fix",
-  "title": "Improve CLI slash autocomplete",
-  "summary": "CLI chat slash commands now use /clear for chat clearing, highlight the Tab completion row, support arrow selection, and keep long input visible.",
-  "features": ["cli", "chat", "autocomplete"]
-}
